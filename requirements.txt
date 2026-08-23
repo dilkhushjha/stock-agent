@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+sqlalchemy
+psycopg2-binary
+python-dotenv
+yfinance
+pandas
+feedparser
+requests
+apscheduler
+joblib
+scikit-learn
