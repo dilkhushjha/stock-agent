@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import "./Dashboard.css";
+import "./CompactRecommendations.css";
 import { getIntelligenceOverview, getRecommendations, runLiveAgent } from "./services/api";
 
 const num = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
