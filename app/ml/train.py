@@ -24,10 +24,7 @@ def get_feature_columns(dataset: pd.DataFrame) -> list[str]:
         "open", "high", "low", "close", "adjusted_close", "volume", "sma20", "sma50",
         *TARGETS,
     }
-    features = [
-        c for c in dataset.columns
-        if c not in excluded and pd.api.types.is_numeric_dtype(dataset[c])
-    ]
+    features = [c for c in dataset.columns if c not in excluded and pd.api.types.is_numeric_dtype(dataset[c])]
     if not features:
         raise ValueError("No numeric feature columns found.")
     return features
@@ -62,6 +59,12 @@ def evaluate_model(model, X_test, y_test, horizon: str):
 
 
 def train():
+    """Train the current broad-universe model from the latest available history.
+
+    Returns a compact training summary so the 24x7 scheduler can retrain without
+    duplicating training logic. The artifact is written only after all horizons
+    train and validate successfully.
+    """
     db = SessionLocal()
     try:
         print("=" * 70)
@@ -84,9 +87,6 @@ def train():
         features = get_feature_columns(dataset)
         X = dataset[features].apply(pd.to_numeric, errors="coerce")
 
-        # Split by trading date, not arbitrary rows. This keeps all stocks from
-        # a given date on the same side of validation and avoids cross-sectional
-        # leakage caused by uneven stock histories.
         unique_dates = sorted(dataset["timestamp"].dropna().unique())
         if len(unique_dates) < 60:
             raise ValueError("At least 60 trading dates are required for training.")
@@ -94,8 +94,6 @@ def train():
         split_date = unique_dates[int(len(unique_dates) * 0.80)]
         train_mask = dataset["timestamp"] < split_date
         test_mask = dataset["timestamp"] >= split_date
-        X_train = X.loc[train_mask]
-        X_test = X.loc[test_mask]
 
         print(f"Stocks: {stock_count}")
         print(f"Rows: {len(dataset)}")
@@ -114,12 +112,8 @@ def train():
                 raise ValueError(f"Insufficient data for {target}.")
 
             horizon = target.replace("target_return_", "")
-            model = train_single_model(
-                X.loc[train_valid], y.loc[train_valid], horizon
-            )
-            metrics[target] = evaluate_model(
-                model, X.loc[test_valid], y.loc[test_valid], horizon
-            )
+            model = train_single_model(X.loc[train_valid], y.loc[train_valid], horizon)
+            metrics[target] = evaluate_model(model, X.loc[test_valid], y.loc[test_valid], horizon)
             models[target] = model
             print(f"{horizon}: {metrics[target]}")
 
@@ -145,6 +139,15 @@ def train():
         print(f"UNIVERSE: {artifact['universe']}")
         print(f"STOCKS: {stock_count}")
         print("=" * 70)
+        return {
+            "status": "trained",
+            "model_path": MODEL_PATH,
+            "model_version": artifact["model_version"],
+            "training_stocks": int(stock_count),
+            "training_rows": int(len(dataset)),
+            "metrics": metrics,
+            "trained_at": artifact["training_started_at"],
+        }
     finally:
         db.close()
 
