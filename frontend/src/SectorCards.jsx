@@ -15,21 +15,16 @@ function SectorCard({ sector, items, recommendations, rank, score }) {
   const avgConfidence = confidence.length ? confidence.reduce((a,b)=>a+b,0)/confidence.length : null;
   const highImpact = items.filter(x=>["HIGH","SEVERE"].includes(String(x.impact||"").toUpperCase())).length;
   const stocks = recs.slice(0,3).map(r=>r.symbol);
-  const reasons = [
-    strongest?.title,
-    strongest?.real_world_effect || strongest?.summary,
-    strongest?.direction || strongest?.impact ? `${label(strongest.direction)}${strongest.impact ? ` · ${label(strongest.impact)}` : ""}` : null,
-    stocks.length ? `Stocks: ${stocks.join(", ")}` : null,
-  ].filter(Boolean).slice(0,4);
+  const reasons = [strongest?.title, strongest?.real_world_effect || strongest?.summary, strongest?.direction || strongest?.impact ? `${label(strongest.direction)}${strongest.impact ? ` · ${label(strongest.impact)}` : ""}` : null].filter(Boolean).slice(0,3);
   const top = rank === 1;
-  return <article className={`sector-card ${top ? "sector-card-top" : ""}`}>
+  return <button type="button" className={`sector-card ${top ? "sector-card-top" : ""}`} onClick={() => window.dispatchEvent(new CustomEvent("stockagent:sector", { detail: { sector } }))}>
     <div className="sector-card-topline"><div className="sector-rank">#{rank}</div><div className="sector-card-heading"><span>SECTOR</span><h4>{label(sector)}</h4></div><div className="sector-activity"><small>PRIORITY</small><strong>{score}</strong><em>/100</em></div></div>
-    {top && <div className="sector-top-badge">TOP OPPORTUNITY</div>}
+    {top && <div className="sector-top-badge">TOP SECTOR SIGNAL</div>}
     <div className="sector-card-summary"><strong>{strongest?.real_world_effect || strongest?.title || "Active sector signal"}</strong></div>
     <div className="sector-card-metrics"><div><span>NEWS</span><strong>{items.length}</strong></div><div><span>CONFIDENCE</span><strong>{percent(avgConfidence)}</strong></div><div><span>5D SIGNAL</span><strong className={avgPrediction===null?"":avgPrediction>=0?"positive":"negative"}>{pct(avgPrediction)}</strong></div><div><span>HIGH IMPACT</span><strong>{highImpact}</strong></div></div>
-    <div className="sector-card-effect"><span>WHY IT MATTERS</span><ul>{reasons.length ? reasons.map((r,i)=><li key={i}>{r}</li>) : <li>Current news and market signals are being evaluated.</li>}</ul></div>
-    <div className="sector-card-footer"><div><span>EXPOSED STOCKS</span><strong>{stocks.length ? stocks.join(" · ") : "No qualified stock yet"}</strong></div><div><span>STATUS</span><strong className={top?"sector-priority-high":""}>{top?"HIGHEST PRIORITY":rank<=3?"WATCH":"MONITOR"}</strong></div></div>
-  </article>;
+    <div className="sector-card-effect"><span>WHY THIS SECTOR</span><ul>{reasons.length ? reasons.map((r,i)=><li key={i}>{r}</li>) : <li>Current news and market signals are being evaluated.</li>}</ul></div>
+    <div className="sector-card-footer"><div><span>STOCKS IDENTIFIED</span><strong>{stocks.length ? stocks.join(" · ") : "No qualified stock yet"}</strong></div><div><span>STATUS</span><strong className={top?"sector-priority-high":""}>{top?"HIGHEST PRIORITY":rank<=3?"WATCH":"MONITOR"}</strong></div></div>
+  </button>;
 }
 
 export default function SectorCards({ groups, recommendations }) {
