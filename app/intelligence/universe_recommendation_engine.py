@@ -15,6 +15,7 @@ class UniverseRecommendationEngine:
 
     UNIVERSE_LIMIT = 2500
     PRIORITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    MAX_STOCKS_PER_SECTOR = 3
 
     @classmethod
     def build(cls, db, limit: int = 10) -> list[dict]:
@@ -75,7 +76,33 @@ class UniverseRecommendationEngine:
             x.get("sector_rank", 999),
             -float(x.get("score") or 0),
         ))
-        selected = candidates[:limit]
+
+        # Keep the strongest sectors dominant, but prevent one sector from
+        # monopolising the shortlist. This makes the shortlist responsive to
+        # multiple simultaneous sector opportunities without manufacturing BUYs.
+        selected = []
+        sector_counts = {}
+        for item in candidates:
+            sector = str(item.get("sector") or "OTHER").strip().upper()
+            if sector_counts.get(sector, 0) >= cls.MAX_STOCKS_PER_SECTOR:
+                continue
+            selected.append(item)
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+            if len(selected) >= limit:
+                break
+
+        # If there are not enough candidates after diversification, fill the
+        # remaining slots with the next strongest candidates.
+        if len(selected) < limit:
+            selected_symbols = {x.get("symbol") for x in selected}
+            for item in candidates:
+                if item.get("symbol") in selected_symbols:
+                    continue
+                selected.append(item)
+                selected_symbols.add(item.get("symbol"))
+                if len(selected) >= limit:
+                    break
+
         for rank, item in enumerate(selected, 1):
             item["rank"] = rank
         return selected
