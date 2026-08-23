@@ -6,8 +6,8 @@ async function apiRequest(endpoint, options = {}) {
     return response.json();
 }
 
-export async function getRecommendations(limit = 5) {
-    return apiRequest(`/recommendations/?limit=${Math.min(limit, 5)}`);
+export async function getRecommendations(limit = 10) {
+    return apiRequest(`/recommendations/?limit=${Math.min(limit, 10)}`);
 }
 
 export async function getIntelligenceOverview(limit = 20) {
