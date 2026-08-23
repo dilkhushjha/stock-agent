@@ -15,8 +15,6 @@ class OpportunityAlertEngine:
 
     @staticmethod
     def _risk(score: float, event: MarketEvent) -> str:
-        if event.impact == "HIGH" and score >= 75:
-            return "MEDIUM"
         if score >= 75:
             return "MEDIUM"
         return "HIGH"
@@ -32,11 +30,7 @@ class OpportunityAlertEngine:
         return "WATCH"
 
     @classmethod
-    def generate_for_event(
-        cls,
-        db: Session,
-        event_id: int,
-    ) -> dict:
+    def generate_for_event(cls, db: Session, event_id: int) -> dict:
         event = db.scalar(
             select(MarketEvent).where(MarketEvent.id == event_id)
         )
@@ -57,12 +51,13 @@ class OpportunityAlertEngine:
         )
 
         alerts = []
+        created_count = 0
+        confidence = float(event.confidence or 0.0)
+
         for result in signal_result["results"]:
             score = float(result["score"])
             if score < cls.MIN_ALERT_SCORE:
                 continue
-
-            action = cls._action(score, event.direction)
 
             existing = db.scalar(
                 select(OpportunityAlert).where(
@@ -74,9 +69,10 @@ class OpportunityAlertEngine:
                 alerts.append(existing)
                 continue
 
+            action = cls._action(score, event.direction)
             reason = (
                 f"{event.title}. {event.description or ''} "
-                f"Event confidence: {event.confidence:.0%}. "
+                f"Event confidence: {confidence:.0%}. "
                 f"Exposure and current market behaviour produced a "
                 f"signal score of {score:.1f}/100."
             )
@@ -86,7 +82,7 @@ class OpportunityAlertEngine:
                 symbol=result["symbol"],
                 factor=entity,
                 action=action,
-                confidence=float(event.confidence or 0.0),
+                confidence=confidence,
                 opportunity_score=score,
                 expected_horizon=event.time_horizon,
                 risk=cls._risk(score, event),
@@ -98,13 +94,14 @@ class OpportunityAlertEngine:
             )
             db.add(alert)
             alerts.append(alert)
+            created_count += 1
 
         db.commit()
 
         return {
             "event_id": event_id,
             "entity": entity,
-            "alerts_created": sum(1 for a in alerts if a.id),
+            "alerts_created": created_count,
             "alerts": [
                 {
                     "id": a.id,
