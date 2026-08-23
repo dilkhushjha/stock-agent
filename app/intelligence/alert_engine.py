@@ -3,10 +3,12 @@ from sqlalchemy.orm import Session
 
 from app.intelligence.causal_impact import CausalImpactEngine
 from app.intelligence.exposure import ExposureMappingService
+from app.intelligence.pricing import MarketPricingEngine
 from app.intelligence.signals import SignalEngine
 from app.models.alert import OpportunityAlert
 from app.models.event import MarketEvent
 from app.models.news import NewsArticle
+from app.models.stock import Stock
 
 
 class OpportunityAlertEngine:
@@ -21,7 +23,9 @@ class OpportunityAlertEngine:
         return "HIGH"
 
     @staticmethod
-    def _action(score: float, direction: str) -> str:
+    def _action(score: float, direction: str, pricing_state: str) -> str:
+        if pricing_state == "MOSTLY_PRICED_IN":
+            return "WATCH"
         if direction == "POSITIVE" and score >= 75:
             return "BUY"
         if direction == "POSITIVE" and score >= 55:
@@ -35,14 +39,23 @@ class OpportunityAlertEngine:
         chain = causal.get("causal_chain", [])
         if not chain:
             return 0.0
-
-        sensitivities = [
-            float(step.get("sensitivity") or 0.5)
-            for step in chain
-        ]
+        sensitivities = [float(step.get("sensitivity") or 0.5) for step in chain]
         average = sum(sensitivities) / len(sensitivities)
         length_bonus = min(0.25, len(chain) * 0.05)
         return min(1.0, average + length_bonus)
+
+    @staticmethod
+    def _pricing_factor(pricing: dict) -> float:
+        state = pricing.get("state")
+        if state == "MOSTLY_PRICED_IN":
+            return 0.15
+        if state == "PARTIALLY_PRICED_IN":
+            return 0.55
+        if state == "EARLY_REACTION":
+            return 0.85
+        if state == "NOT_YET_PRICED_IN":
+            return 1.0
+        return 0.70
 
     @classmethod
     def generate_for_event(cls, db: Session, event_id: int) -> dict:
@@ -69,11 +82,21 @@ class OpportunityAlertEngine:
         confidence = float(event.confidence or 0.0)
 
         for result in signal_result["results"]:
+            stock = db.scalar(select(Stock).where(Stock.symbol == result["symbol"]))
+            if not stock:
+                continue
+
             market_score = float(result["score"])
-            # Causal evidence is deliberately additive, not dominant. Market
-            # behaviour still has to confirm the thesis.
+            pricing = MarketPricingEngine.analyze(db=db, event=event, stock=stock)
+            pricing_factor = cls._pricing_factor(pricing)
+
             score = round(
-                min(100.0, market_score * 0.75 + (causal_strength * 100.0) * 0.25),
+                min(
+                    100.0,
+                    market_score * 0.60
+                    + (causal_strength * 100.0) * 0.20
+                    + (pricing_factor * 100.0) * 0.20,
+                ),
                 2,
             )
 
@@ -90,18 +113,23 @@ class OpportunityAlertEngine:
                     updated_count += 1
                 continue
 
-            action = cls._action(score, result["direction"])
+            action = cls._action(score, result["direction"], pricing["state"])
             chain_text = " → ".join(
                 [causal.get("entity", entity)]
                 + [step["to"] for step in causal.get("causal_chain", [])]
+            )
+            pricing_text = (
+                f"Market pricing: {pricing['state']}; "
+                f"reaction={pricing['reaction_percent']}%; "
+                f"remaining potential={pricing['remaining_potential_percent']}%."
             )
             reason = (
                 f"{event.title}. {event.description or ''} "
                 f"Event confidence: {confidence:.0%}. "
                 f"Causal chain: {chain_text or 'not established'}. "
                 f"Causal strength: {causal_strength:.0%}. "
-                f"Market signal: {market_score:.1f}/100; "
-                f"combined opportunity score: {score:.1f}/100."
+                f"Market signal: {market_score:.1f}/100. "
+                f"{pricing_text} Combined opportunity score: {score:.1f}/100."
             ).strip()
 
             if existing:
