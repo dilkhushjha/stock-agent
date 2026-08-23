@@ -10,6 +10,10 @@ export async function getRecommendations(limit = 5) {
     return apiRequest(`/recommendations/?limit=${limit}`);
 }
 
+export async function getIntelligenceOverview(limit = 12) {
+    return apiRequest(`/intelligence/overview?limit=${limit}`);
+}
+
 export async function runLiveAgent() {
     return apiRequest("/agent/run-now", { method: "POST" });
 }
