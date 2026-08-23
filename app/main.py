@@ -15,6 +15,7 @@ from app.api.market_context import router as market_context_router
 from app.api.sector import router as sector_router
 from app.api.ml_predictions import router as ml_predictions_router
 from app.api.backtest import router as backtest_router
+from app.api.agent import router as agent_router
 from app.data.database_init import initialize_database
 
 
@@ -44,7 +45,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 app.include_router(fundamentals_router)
 app.include_router(graph_router)
 app.include_router(exposure_router)
@@ -56,6 +56,7 @@ app.include_router(sector_router)
 app.include_router(ml_predictions_router)
 app.include_router(alerts_router)
 app.include_router(backtest_router)
+app.include_router(agent_router)
 
 
 @app.get("/")
