@@ -3,6 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.data.database import get_db
+from app.intelligence.pipeline_diagnostics import OpportunityPipelineDiagnostics
 from app.intelligence.run_backtest import BacktestRunner
 from app.models.event import MarketEvent
 from app.models.market_data import MarketData
@@ -29,6 +30,11 @@ def data_health(db: Session = Depends(get_db)):
         "market_data_range": {"from": first_market, "to": last_market},
         "event_range": {"from": first_event, "to": last_event},
     }
+
+
+@router.get("/diagnose/{event_id}")
+def diagnose_event(event_id: int, db: Session = Depends(get_db)):
+    return OpportunityPipelineDiagnostics.inspect_event(db, event_id)
 
 
 @router.post("/run")
