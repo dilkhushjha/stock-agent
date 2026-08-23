@@ -5,6 +5,7 @@ from app.models.event import MarketEvent
 from app.models.news import NewsArticle
 from app.intelligence.events.event_extractor import EventExtractor
 from app.intelligence.event_fusion import EventFusionEngine
+from app.intelligence.alert_engine import OpportunityAlertEngine
 
 
 class EventIntelligenceService:
@@ -13,9 +14,7 @@ class EventIntelligenceService:
         self.extractor = EventExtractor()
 
     def process_article(self, db: Session, article_id: int) -> dict:
-        article = db.scalar(
-            select(NewsArticle).where(NewsArticle.id == article_id)
-        )
+        article = db.scalar(select(NewsArticle).where(NewsArticle.id == article_id))
         if not article:
             raise ValueError(f"Article {article_id} not found.")
 
@@ -46,11 +45,13 @@ class EventIntelligenceService:
             fused = EventFusionEngine.merge(db, existing, result)
             article.is_processed = True
             db.commit()
+            alert_result = OpportunityAlertEngine.generate_for_event(db, fused.id)
             return {
                 "status": "fused",
                 "event_id": fused.id,
                 "event": result,
                 "confidence": fused.confidence,
+                "alerts": alert_result,
             }
 
         event = MarketEvent(
@@ -72,4 +73,10 @@ class EventIntelligenceService:
         db.commit()
         db.refresh(event)
 
-        return {"status": "processed", "event_id": event.id, "event": result}
+        alert_result = OpportunityAlertEngine.generate_for_event(db, event.id)
+        return {
+            "status": "processed",
+            "event_id": event.id,
+            "event": result,
+            "alerts": alert_result,
+        }
