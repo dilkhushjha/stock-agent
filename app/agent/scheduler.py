@@ -64,8 +64,6 @@ def start_scheduler():
         max_instances=1,
     )
 
-    # Run the first quantitative prediction pass shortly after startup so the
-    # dashboard does not have to wait for the first 15-minute interval.
     scheduler.add_job(
         run_ml_prediction_cycle,
         trigger="date",
@@ -77,7 +75,7 @@ def start_scheduler():
     scheduler.start()
     print("[SCHEDULER] Market Agent started.")
     print("[SCHEDULER] News cycle: every 5 minutes.")
-    print("[SCHEDULER] Market data sync: every 15 minutes.")
+    print("[SCHEDULER] Market data sync: every 15 minutes (recent window).")
     print("[SCHEDULER] ML predictions: every 15 minutes.")
     print("[SCHEDULER] Opportunity refresh: every 15 minutes.")
 
@@ -100,15 +98,22 @@ def run_evaluation():
 
 
 def run_market_data_sync():
-    print("[MARKET DATA] Synchronizing prices...")
+    """Refresh only recent OHLCV during live operation.
+
+    Historical bootstrap is intentionally separate so the 24x7 scheduler does
+    not repeatedly download hundreds of days for every stock.
+    """
+    print("[MARKET DATA] Synchronizing recent prices...")
     db = SessionLocal()
     try:
-        result = MarketDataSyncService.sync(db=db, provider=market_data_provider)
+        service = MarketDataSyncService(provider=market_data_provider)
+        result = service.sync(db=db, history_days=5, workers=8)
         print(
             "[MARKET DATA] "
-            f"Processed={result['stocks']} "
-            f"Succeeded={result['successful']} "
-            f"Failed={result['failed']}"
+            f"Processed={result['requested_stocks']} "
+            f"Succeeded={result['successful_stocks']} "
+            f"Failed={result['failed_stocks']} "
+            f"Inserted={result['inserted_rows']}"
         )
     except Exception as exc:
         print(f"[MARKET DATA] Sync failed: {exc}")
@@ -117,12 +122,7 @@ def run_market_data_sync():
 
 
 def run_ml_prediction_cycle():
-    """Run the already-trained model against the newest available data.
-
-    Training is deliberately not part of this cycle. The saved artifact is
-    loaded once and inference is repeated for every active company. New market
-    rows therefore produce new predictions without retraining the model.
-    """
+    """Run the currently promoted model against the newest available data."""
     print("[ML] Running live prediction cycle...")
     db = SessionLocal()
     try:
