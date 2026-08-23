@@ -16,9 +16,9 @@ from app.models.stock import Stock
 class MarketDataSyncService:
     """Synchronize daily OHLCV data for the broad active NSE universe.
 
-    Historical bootstrap fetches are concurrent because a 2,000+ stock universe
-    cannot be populated efficiently with one network request at a time. Database
-    writes remain serialized through the calling thread/session.
+    Yahoo Finance rate-limits aggressive parallel chart requests. The bootstrap
+    path therefore deliberately uses a conservative worker ceiling; reliability
+    is more important than shaving a few minutes from a multi-thousand-stock load.
     """
 
     def __init__(self, provider=None):
@@ -73,12 +73,14 @@ class MarketDataSyncService:
         db: Session,
         history_days: int = 5,
         limit: int | None = None,
-        workers: int = 8,
+        workers: int = 2,
     ) -> dict:
         """Sync a recent window for live operation or a larger window for bootstrap.
 
         Use history_days=365/730 for historical bootstrap. The live scheduler should
         use a small window because historical rows are already persisted.
+        Yahoo requests are intentionally capped at four concurrent workers and
+        normally run with two to avoid provider throttling.
         """
         end = datetime.utcnow()
         start = end - timedelta(days=max(1, history_days))
@@ -92,11 +94,9 @@ class MarketDataSyncService:
         if limit is not None:
             stocks = stocks[:max(0, limit)]
 
-        # Do not use a SQLAlchemy session from worker threads. Only HTTP fetches
-        # happen concurrently; all database work is performed below in this thread.
         fetch_results = {}
-        failed = []
-        worker_count = max(1, min(int(workers), 16))
+        stock_failures = []
+        worker_count = max(1, min(int(workers), 4))
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
             futures = {
                 pool.submit(self._fetch, stock.yahoo_symbol, start, end): stock
@@ -108,7 +108,7 @@ class MarketDataSyncService:
                 symbol, rows, error = future.result()
                 fetch_results[stock.id] = rows
                 if error:
-                    failed.append({"symbol": symbol, "error": error})
+                    stock_failures.append({"symbol": symbol, "error": error})
 
         inserted = updated = successful = 0
         results = []
@@ -123,8 +123,7 @@ class MarketDataSyncService:
             else:
                 results.append({"symbol": stock.symbol, "rows": 0, "error": "No data returned"})
 
-        # Benchmarks are always refreshed because sector-relative and market-relative
-        # features depend on a consistent index history.
+        benchmark_failures = []
         for benchmark in BenchmarkRegistry.all():
             try:
                 rows = self.provider.history(benchmark.symbol, start, end)
@@ -136,16 +135,17 @@ class MarketDataSyncService:
                 updated += upd
                 results.append({"symbol": benchmark.symbol, "rows": len(rows), "inserted": ins, "updated": upd})
             except Exception as exc:
-                failed.append({"symbol": benchmark.symbol, "error": str(exc)})
+                benchmark_failures.append({"symbol": benchmark.symbol, "error": str(exc)})
 
         db.commit()
         return {
             "history_days": history_days,
             "requested_stocks": len(stocks),
             "successful_stocks": successful,
-            "failed_stocks": len(failed),
+            "failed_stocks": len(stock_failures),
             "inserted_rows": inserted,
             "updated_rows": updated,
-            "failed": failed,
+            "failed": stock_failures,
+            "benchmark_failures": benchmark_failures,
             "results": results,
         }
