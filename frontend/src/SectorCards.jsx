@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import "./SectorCards.css";
 
 const n = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
 const pct = (v) => n(v) === null ? "—" : `${n(v) >= 0 ? "+" : ""}${n(v).toFixed(2)}%`;
@@ -13,7 +14,7 @@ function SectorCard({ sector, items, recommendations = [], rank }) {
   const confidence = items.map((x) => n(x.confidence)).filter((v) => v !== null);
   const avgConfidence = confidence.length ? confidence.reduce((a, b) => a + b, 0) / confidence.length : null;
   const highImpact = items.filter((x) => String(x.impact || "").toUpperCase() === "HIGH").length;
-  const positive = items.filter((x) => String(x.direction || "").toUpperCase().includes("POSITIVE") || String(x.direction || "").toUpperCase().includes("BULL")).length;
+  const positive = items.filter((x) => /positive|bull/i.test(String(x.direction || ""))).length;
   const activityScore = Math.round(Math.min(100, items.length * 12 + highImpact * 14 + positive * 6 + (avgConfidence || 0) * 35 + Math.max(0, avgPrediction || 0) * 2));
   const topStocks = sectorRecs.slice(0, 3).map((r) => r.symbol).join(" · ");
 
@@ -38,5 +39,5 @@ export default function SectorCards({ groups, recommendations }) {
     const score = items.length * 12 + high * 14 + directional * 6 + avgConfidence * 35 + Math.max(0, avgPrediction) * 2;
     return { sector, items, score };
   }).sort((a, b) => b.score - a.score), [groups, recommendations]);
-  return <div className="sector-cards-grid">{ranked.map((item, index) => <SectorCard key={item.sector} {...item} rank={index + 1} recommendations={recommendations} />)}</div>;
+  return <div className="sector-cards-grid">{ranked.map((item, index) => <SectorCard key={item.sector} {...item} rank={index + 1} recommendations={recommendations}/>)}</div>;
 }
