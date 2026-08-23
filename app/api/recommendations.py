@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.data.database import get_db
 from app.intelligence.causal_intelligence import CausalIntelligence
 from app.intelligence.exposure import ExposureMappingService
-from app.intelligence.recommendation_engine import RecommendationEngine
+from app.intelligence.universe_recommendation_engine import UniverseRecommendationEngine
 from app.models.event import MarketEvent
 
 router = APIRouter(prefix="/recommendations", tags=["Recommendations"])
@@ -15,14 +15,14 @@ router = APIRouter(prefix="/recommendations", tags=["Recommendations"])
 
 @router.get("/")
 def get_recommendations(
-    limit: int = Query(5, ge=1, le=10),
+    limit: int = Query(10, ge=1, le=20),
     db: Session = Depends(get_db),
 ):
-    recommendations = RecommendationEngine.build(db, limit=limit)
+    # IMPORTANT: limit controls the output, not the search universe.
+    # The engine scans the active NSE universe first and only then selects the
+    # strongest ideas.
+    recommendations = UniverseRecommendationEngine.build(db, limit=limit)
 
-    # Enrich every idea with the event -> economic mechanism -> sector -> stock chain.
-    # This is deliberately done after the existing multi-factor engine so the
-    # recommendation remains evidence-first rather than becoming a news-only scorer.
     for item in recommendations:
         event_id = item.get("evidence", {}).get("event_id")
         event = db.scalar(select(MarketEvent).where(MarketEvent.id == event_id)) if event_id else None
@@ -31,7 +31,6 @@ def get_recommendations(
 
         normalized_sector = ExposureMappingService.normalize_entity(item.get("sector") or "")
         if causal and causal.get("normalized_entity") == normalized_sector:
-            # Direct exposure to the currently important sector gets precedence.
             exposure = next(
                 (row for row in causal.get("exposed_stocks", []) if row.get("symbol") == item.get("symbol")),
                 None,
@@ -55,5 +54,6 @@ def get_recommendations(
 
     return {
         "generated_at": datetime.utcnow().isoformat(),
+        "universe_scanned": max((x.get("universe_scanned", 0) for x in recommendations), default=0),
         "recommendations": recommendations[:limit],
     }
