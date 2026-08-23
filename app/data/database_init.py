@@ -25,6 +25,7 @@ def _add_missing_column(table_name: str, column_name: str, column_type: str):
 def initialize_database():
     Base.metadata.create_all(bind=engine)
 
-    # create_all() does not alter existing SQLite tables. Keep this migration
-    # lightweight so existing user databases continue working after model changes.
+    # create_all() does not alter existing SQLite tables. Keep this lightweight
+    # migration layer so existing user databases continue working after model changes.
     _add_missing_column("market_events", "event_date", "DATETIME")
+    _add_missing_column("news_articles", "fingerprint", "VARCHAR(64)")
