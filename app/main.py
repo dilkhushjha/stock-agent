@@ -19,6 +19,7 @@ from app.api.agent import router as agent_router
 from app.api.recommendations import router as recommendations_router
 from app.api.intelligence import router as intelligence_router
 from app.api.universe import router as universe_router
+from app.api.classification import router as classification_router
 from app.data.database_init import initialize_database
 
 
@@ -48,6 +49,7 @@ app.include_router(agent_router)
 app.include_router(recommendations_router)
 app.include_router(intelligence_router)
 app.include_router(universe_router)
+app.include_router(classification_router)
 
 
 @app.get("/")
