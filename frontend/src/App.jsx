@@ -1,81 +1,76 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
-import { getPredictions, getOpportunityAlerts, runLiveAgent } from "./services/api";
-import MarketRegime from "./components/MarketRegime";
+import { getRecommendations, runLiveAgent } from "./services/api";
+
+const pct = (v) => Number.isFinite(Number(v)) ? `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%` : "—";
+const money = (v) => Number.isFinite(Number(v)) ? `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "—";
+const percent = (v) => Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(0)}%` : "—";
+const metric = (v, suffix = "") => Number.isFinite(Number(v)) ? `${Number(v).toFixed(2)}${suffix}` : "—";
+
+function Fundamental({ label, value }) {
+  return <div className="fundamental"><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function RecommendationCard({ item }) {
+  const f = item.fundamentals || {};
+  return <article className="recommendation-card">
+    <div className="rec-head">
+      <div className="rank">#{item.rank}</div>
+      <div className="identity"><div className="symbol-row"><h2>{item.symbol}</h2><span className={`action ${item.action === "BUY" ? "buy" : "watch"}`}>{item.action}</span></div><p>{item.company}{item.sector ? ` · ${item.sector}` : ""}</p></div>
+      <div className="score"><strong>{item.score.toFixed(0)}</strong><span>/100</span><small>conviction</small></div>
+    </div>
+
+    <div className="thesis"><span>WHY THIS STOCK</span><h3>{item.thesis}</h3><p>{item.reason}</p></div>
+
+    <div className="evidence-row"><div><span>Why now</span><strong>{item.why_now}</strong></div><div><span>Risk</span><strong>{item.risk}</strong></div><div><span>Horizon</span><strong>{item.horizon || "—"}</strong></div><div><span>Confidence</span><strong>{percent(item.confidence)}</strong></div></div>
+
+    <div className="analysis-grid">
+      <section><h4>Fundamentals</h4><div className="fundamental-grid"><Fundamental label="P/E" value={metric(f.pe)} /><Fundamental label="ROE" value={percent(f.roe)} /><Fundamental label="Debt / Equity" value={metric(f.debt_to_equity)} /><Fundamental label="Profit margin" value={percent(f.profit_margin)} /><Fundamental label="Revenue growth" value={percent(f.revenue_growth)} /><Fundamental label="Earnings growth" value={percent(f.earnings_growth)} /></div></section>
+      <section><h4>Prediction</h4><div className="prediction-box"><div><span>5D expected</span><strong className={Number(item.predicted_5d) >= 0 ? "positive" : "negative"}>{pct(item.predicted_5d)}</strong></div><div><span>20D expected</span><strong className={Number(item.predicted_20d) >= 0 ? "positive" : "negative"}>{pct(item.predicted_20d)}</strong></div><div><span>Model signal</span><strong>{item.model_signal || "—"}</strong></div><div><span>Model evidence</span><strong>{item.model_score.toFixed(0)}/100</strong></div></div></section>
+    </div>
+
+    <div className="entry-strip"><div><span>Current price</span><strong>{money(item.current_price)}</strong></div><div><span>Preferred accumulation</span><strong>{item.entry_low && item.entry_high ? `${money(item.entry_low)} – ${money(item.entry_high)}` : "Refresh market data"}</strong></div><div className="invalidation"><span>Thesis invalidation</span><strong>{item.invalidation}</strong></div></div>
+
+    {item.evidence?.source_url && <div className="card-footer"><span>Evidence: {item.evidence.source || "market source"}</span><a href={item.evidence.source_url} target="_blank" rel="noreferrer">Read source →</a></div>}
+  </article>;
+}
 
 function App() {
-  const [predictions, setPredictions] = useState([]);
-  const [alerts, setAlerts] = useState([]);
+  const [recommendations, setRecommendations] = useState([]);
+  const [generatedAt, setGeneratedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
-  const [cycle, setCycle] = useState(null);
-  const [darkMode, setDarkMode] = useState(false);
 
-  async function loadDashboard() {
+  async function load() {
     try {
-      setLoading(true); setError("");
-      const [predictionData, alertData] = await Promise.all([getPredictions(), getOpportunityAlerts(20)]);
-      setPredictions(Array.isArray(predictionData) ? predictionData : []);
-      setAlerts(Array.isArray(alertData) ? alertData : []);
-    } catch (err) { console.error(err); setError("Unable to connect to the backend API."); }
-    finally { setLoading(false); }
+      setError("");
+      const data = await getRecommendations(5);
+      setRecommendations(data.recommendations || []);
+      setGeneratedAt(data.generated_at);
+    } catch (e) {
+      console.error(e);
+      setError("StockAgent could not load its recommendations. Make sure the backend is running.");
+    } finally { setLoading(false); }
   }
 
-  useEffect(() => { loadDashboard(); const timer = setInterval(loadDashboard, 60_000); return () => clearInterval(timer); }, []);
+  useEffect(() => { load(); const timer = setInterval(load, 60_000); return () => clearInterval(timer); }, []);
 
-  async function runAgentNow() {
-    try { setRunning(true); setError(""); setCycle(await runLiveAgent()); await loadDashboard(); }
-    catch (err) { console.error(err); setError("Live intelligence scan failed. Check the backend console."); }
+  async function scan() {
+    try { setRunning(true); setError(""); await runLiveAgent(); await load(); }
+    catch (e) { console.error(e); setError("Live intelligence scan failed. Check the backend console."); }
     finally { setRunning(false); }
   }
 
-  const stats = useMemo(() => ({
-    total: predictions.length,
-    buy: predictions.filter((p) => String(p.signal).toUpperCase() === "BUY").length,
-    alerts: alerts.length,
-    highConfidence: alerts.filter((a) => Number(a.confidence) >= 0.7).length,
-  }), [predictions, alerts]);
-  const topOpportunities = useMemo(() => [...alerts].sort((a,b) => Number(b.opportunity_score||0)-Number(a.opportunity_score||0)).slice(0,6), [alerts]);
-  const formatPercent = (v) => Number.isFinite(Number(v)) ? `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%` : "—";
-  const formatConfidence = (v) => Number.isFinite(Number(v)) ? `${(Number(v)*100).toFixed(0)}%` : "—";
-  const signalClass = (v) => ["buy"].includes(String(v||"").toLowerCase()) ? "signal-buy" : ["sell","avoid"].includes(String(v||"").toLowerCase()) ? "signal-sell" : "signal-hold";
-
-  return <div className={darkMode ? "app dark" : "app light"}>
-    <header className="dashboard-header">
-      <div className="brand"><div className="brand-mark">S</div><div><h1>StockAgent</h1><p>Real-time market intelligence · early opportunity detection</p></div></div>
-      <div className="header-actions">
-        <button className="primary-button" onClick={runAgentNow} disabled={running}>{running ? "Scanning…" : "⚡ Scan now"}</button>
-        <button className="icon-button" onClick={loadDashboard} disabled={loading} title="Refresh">↻</button>
-        <button className="theme-button" onClick={() => setDarkMode(v=>!v)} title="Toggle theme">{darkMode ? "☀" : "☾"}</button>
-      </div>
-    </header>
-
-    <main className="dashboard-content">
-      {error && <div className="error-banner">{error}</div>}
-      <section className="hero-panel">
-        <div><div className="eyebrow"><span className="live-dot"/> LIVE INTELLIGENCE</div><h2>What is happening in the market <span>right now?</span></h2><p>StockAgent connects real-world events, company exposure and market behaviour to surface opportunities before they become obvious.</p></div>
-        <div className="hero-metric"><strong>{topOpportunities.length}</strong><span>actionable alerts</span></div>
-      </section>
-
-      <section className="section opportunity-section">
-        <div className="section-header"><div><h2>🚨 Live Opportunities</h2><p>Potential market-moving situations that currently deserve attention.</p></div><span className="status-pill"><i/> LIVE · 5 MIN</span></div>
-        {topOpportunities.length === 0 ? <div className="empty-opportunity"><div className="empty-icon">⌁</div><div><strong>No actionable opportunity detected</strong><p>Run a scan to analyze the latest news and market conditions.</p></div><button className="secondary-button" onClick={runAgentNow} disabled={running}>{running ? "Scanning…" : "Run scan"}</button></div> : <div className="opportunity-grid">
-          {topOpportunities.map((a,i)=><article className={`opportunity-card ${i===0?"featured":""}`} key={a.id}>
-            <div className="opportunity-top"><div><span className={`signal ${signalClass(a.action)}`}>{a.action||"WATCH"}</span><h3>{a.symbol}</h3></div><div className="score"><strong>{Number(a.opportunity_score||0).toFixed(0)}</strong><span>/100</span></div></div>
-            <p className="opportunity-title">{a.title}</p><p className="opportunity-reason">{a.reason}</p>
-            <div className="opportunity-details"><div><span>Confidence</span><strong>{formatConfidence(a.confidence)}</strong></div><div><span>Risk</span><strong>{a.risk||"—"}</strong></div><div><span>Horizon</span><strong>{a.expected_horizon||"—"}</strong></div></div>
-            {a.source_url && <a className="source-link" href={a.source_url} target="_blank" rel="noreferrer">View evidence →</a>}
-          </article>)}
-        </div>}
-      </section>
-
-      {cycle && <section className="section"><div className="section-header"><div><h2>Latest scan</h2><p>Results from the most recent intelligence cycle.</p></div></div><div className="stats-grid cycle-stats"><div className="stat-card"><span>Articles collected</span><strong>{cycle.collected??0}</strong></div><div className="stat-card"><span>New articles</span><strong>{cycle.inserted??0}</strong></div><div className="stat-card"><span>Articles processed</span><strong>{cycle.opportunities?.articles_processed??0}</strong></div><div className="stat-card buy-card"><span>Alerts created</span><strong>{cycle.opportunities?.alerts_created??0}</strong></div></div></section>}
-
-      <section className="section"><MarketRegime/></section>
-      <section className="stats-grid summary-stats"><div className="stat-card"><span>Model predictions</span><strong>{stats.total}</strong></div><div className="stat-card buy-card"><span>BUY signals</span><strong>{stats.buy}</strong></div><div className="stat-card"><span>Live alerts</span><strong>{stats.alerts}</strong></div><div className="stat-card"><span>High confidence</span><strong>{stats.highConfidence}</strong></div></section>
-      <section className="section"><div className="section-header"><div><h2>Model predictions</h2><p>Quantitative forecasts are supporting evidence, not the primary alert engine.</p></div></div><div className="table-container">{loading?<div className="empty-state">Loading predictions…</div>:predictions.length===0?<div className="empty-state">No model predictions available.</div>:<table><thead><tr><th>Stock</th><th>Signal</th><th>5D</th><th>10D</th><th>20D</th><th>Confidence</th><th>Price</th><th>Model</th></tr></thead><tbody>{predictions.map(p=><tr key={p.id}><td className="stock-name">{p.symbol}</td><td><span className={`signal ${signalClass(p.signal)}`}>{p.signal||"HOLD"}</span></td><td className={Number(p.predicted_return_5d)>=0?"positive":"negative"}>{formatPercent(p.predicted_return_5d)}</td><td>{formatPercent(p.predicted_return_10d)}</td><td>{formatPercent(p.predicted_return_20d)}</td><td>{formatConfidence(p.confidence)}</td><td>{Number.isFinite(Number(p.price_at_prediction))?Number(p.price_at_prediction).toFixed(2):"—"}</td><td>{p.model_name||"—"}</td></tr>)}</tbody></table>}</div></section>
+  return <div className="app">
+    <header><div className="brand"><div className="logo">S</div><div><h1>StockAgent</h1><p>AI-powered Indian stock intelligence</p></div></div><button className="scan" onClick={scan} disabled={running}>{running ? "Analyzing…" : "↻ Analyze now"}</button></header>
+    <main>
+      <section className="intro"><div><div className="live"><i/> LIVE INTELLIGENCE</div><h2>Stocks worth considering <span>right now.</span></h2><p>StockAgent filters the market and gives you a small shortlist backed by current events, news, company fundamentals, historical evidence, market behaviour and quantitative prediction.</p></div><div className="updated">{generatedAt ? `Updated ${new Date(generatedAt).toLocaleTimeString()}` : "Analyzing market…"}</div></section>
+      {error && <div className="error">{error}</div>}
+      {loading ? <div className="empty">Analyzing current opportunities…</div> : recommendations.length === 0 ? <div className="empty"><strong>No high-conviction recommendation yet.</strong><p>StockAgent will keep monitoring events and market conditions. Run an analysis to refresh the thesis.</p><button className="secondary" onClick={scan} disabled={running}>{running ? "Analyzing…" : "Analyze now"}</button></div> : <section className="recommendations"><div className="section-title"><div><h3>Top recommendations</h3><p>Maximum 5 ideas. The system deliberately avoids turning this into a broker terminal.</p></div><span>{recommendations.length} ideas</span></div>{recommendations.map((item) => <RecommendationCard key={`${item.symbol}-${item.rank}`} item={item} />)}</section>}
+      <section className="method"><h3>How StockAgent reaches a recommendation</h3><div className="method-flow"><span>News & events</span><b>→</b><span>Economic impact</span><b>→</b><span>Company exposure</span><b>→</b><span>Fundamentals</span><b>→</b><span>ML prediction</span><b>→</b><strong>Recommendation</strong></div></section>
     </main>
   </div>;
 }
+
 export default App;
