@@ -8,7 +8,6 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Python
-a__pycache__/
 __pycache__/
 *.py[cod]
 
