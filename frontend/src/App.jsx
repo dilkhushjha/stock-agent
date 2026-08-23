@@ -1,110 +1,118 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import { getIntelligenceOverview, getRecommendations, runLiveAgent } from "./services/api";
 
-const pct = (v) => Number.isFinite(Number(v)) ? `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%` : "—";
-const money = (v) => Number.isFinite(Number(v)) ? `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "—";
-const percent = (v) => Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(0)}%` : "—";
-const metric = (v, suffix = "") => Number.isFinite(Number(v)) ? `${Number(v).toFixed(2)}${suffix}` : "—";
-const label = (v) => String(v || "MARKET").replaceAll("_", " ");
+const num = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
+const pct = (v) => num(v) === null ? "—" : `${num(v) >= 0 ? "+" : ""}${num(v).toFixed(2)}%`;
+const money = (v) => num(v) === null ? "—" : `₹${num(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+const percent = (v) => num(v) === null ? "—" : `${(num(v) * 100).toFixed(0)}%`;
+const label = (v) => String(v || "Uncategorized").replaceAll("_", " ");
 
-function Fundamental({ label: name, value }) {
-  return <div className="fundamental"><span>{name}</span><strong>{value}</strong></div>;
-}
+function Metric({ name, value }) { return <div className="metric"><span>{name}</span><strong>{value}</strong></div>; }
 
 function NewsCard({ item }) {
   return <article className="news-card">
-    <div className="news-meta"><span className="news-category">{label(item.category)}</span><span>{item.source || "News source"}</span><span>{item.published_at ? new Date(item.published_at).toLocaleString() : ""}</span></div>
-    <h3>{item.title}</h3>
-    <p className="news-summary">{item.summary || "No summary available."}</p>
-    <div className="impact-grid">
-      <div><span>Potential sector impact</span><strong>{item.sector || "Under analysis"}</strong></div>
-      <div><span>Direction</span><strong>{label(item.direction) || "—"}</strong></div>
-      <div><span>Impact</span><strong>{label(item.impact) || "—"}</strong></div>
-      <div><span>Time horizon</span><strong>{item.horizon || "—"}</strong></div>
+    <div className="news-meta"><span className="tag">{label(item.category)}</span><span>{item.source || "News source"}</span><span>{item.published_at ? new Date(item.published_at).toLocaleString() : ""}</span></div>
+    <h4>{item.title}</h4>
+    <p className="summary">{item.summary || "StockAgent is analysing this event for market relevance."}</p>
+    <div className="impact-row">
+      <Metric name="Sector" value={label(item.sector)} />
+      <Metric name="Direction" value={label(item.direction)} />
+      <Metric name="Impact" value={label(item.impact)} />
+      <Metric name="Horizon" value={item.horizon || "—"} />
     </div>
-    <div className="real-world"><span>REAL-WORLD EFFECT</span><p>{item.real_world_effect}</p></div>
-    {item.source_url && <a className="source-link" href={item.source_url} target="_blank" rel="noreferrer">Read original news →</a>}
+    <div className="world-effect"><span>REAL-WORLD EFFECT</span><p>{item.real_world_effect || "This event is being evaluated for its economic and company-level consequences."}</p></div>
+    {item.source_url && <a className="source" href={item.source_url} target="_blank" rel="noreferrer">Read source →</a>}
   </article>;
 }
 
-function RecommendationCard({ item }) {
+function Recommendation({ item }) {
   const f = item.fundamentals || {};
-  const news = item.news || {};
-  const event = item.event || {};
-  return <article className="recommendation-card">
-    <div className="rec-head">
+  const n = item.news || {};
+  const e = item.event || {};
+  return <article className="recommendation">
+    <div className="rec-top">
       <div className="rank">#{item.rank}</div>
-      <div className="identity"><div className="symbol-row"><h2>{item.symbol}</h2><span className={`action ${item.action === "BUY" ? "buy" : "watch"}`}>{item.action}</span></div><p>{item.company}{item.sector ? ` · ${item.sector}` : ""}</p></div>
-      <div className="score"><strong>{Number(item.score || 0).toFixed(0)}</strong><span>/100</span><small>conviction</small></div>
+      <div className="rec-title"><div className="symbol"><h2>{item.symbol}</h2><span className={item.action === "BUY" ? "buy" : "watch"}>{item.action}</span></div><p>{item.company} · {item.sector || "Sector under analysis"}</p></div>
+      <div className="conviction"><strong>{Number(item.score || 0).toFixed(0)}</strong><span>/100</span><small>conviction</small></div>
     </div>
 
-    <div className="thesis"><span>THE INVESTMENT THESIS</span><h3>{item.thesis}</h3><p>{item.reason}</p></div>
+    <div className="thesis"><span>WHY THIS STOCK?</span><h3>{item.thesis || "Evidence-backed opportunity"}</h3><p>{item.reason}</p></div>
 
-    <div className="catalyst"><div><span>CATALYST / NEWS</span><strong>{news.title || event.title || "Current market event"}</strong><small>{news.source || "Internal intelligence"}</small></div><div><span>REAL-WORLD IMPACT</span><p>{event.description || item.why_now}</p></div></div>
-
-    <div className="evidence-row"><div><span>Why now</span><strong>{item.why_now}</strong></div><div><span>Risk</span><strong>{item.risk}</strong></div><div><span>Horizon</span><strong>{item.horizon || "—"}</strong></div><div><span>Confidence</span><strong>{percent(item.confidence)}</strong></div></div>
-
-    <div className="analysis-grid">
-      <section><h4>Company fundamentals</h4><div className="fundamental-grid"><Fundamental label="P/E" value={metric(f.pe)} /><Fundamental label="ROE" value={percent(f.roe)} /><Fundamental label="Debt / Equity" value={metric(f.debt_to_equity)} /><Fundamental label="Profit margin" value={percent(f.profit_margin)} /><Fundamental label="Revenue growth" value={percent(f.revenue_growth)} /><Fundamental label="Earnings growth" value={percent(f.earnings_growth)} /></div><div className="subscore">Fundamental quality <strong>{Number(item.fundamental_score || 0).toFixed(0)}/100</strong></div></section>
-      <section><h4>AI / quantitative prediction</h4><div className="prediction-box"><div><span>5D expected</span><strong className={Number(item.predicted_5d) >= 0 ? "positive" : "negative"}>{pct(item.predicted_5d)}</strong></div><div><span>20D expected</span><strong className={Number(item.predicted_20d) >= 0 ? "positive" : "negative"}>{pct(item.predicted_20d)}</strong></div><div><span>Model signal</span><strong>{item.model_signal || "—"}</strong></div><div><span>Model score</span><strong>{Number(item.model_score || 0).toFixed(0)}/100</strong></div></div><div className="subscore">Intelligence + event score <strong>{Number(item.score || 0).toFixed(0)}/100</strong></div></section>
+    <div className="catalyst-grid">
+      <div><span>NEWS / CATALYST</span><strong>{n.title || e.title || "Market event"}</strong><small>{n.source || item.evidence?.source || "StockAgent intelligence"}</small></div>
+      <div><span>REAL-WORLD IMPACT</span><p>{e.description || item.why_now || "Event impact is being evaluated."}</p></div>
     </div>
 
-    <div className="entry-strip"><div><span>Current price</span><strong>{money(item.current_price)}</strong></div><div><span>Preferred accumulation zone</span><strong>{item.entry_low && item.entry_high ? `${money(item.entry_low)} – ${money(item.entry_high)}` : "Not enough fresh price data"}</strong></div><div className="invalidation"><span>What would invalidate the idea?</span><strong>{item.invalidation}</strong></div></div>
+    <div className="signals"><Metric name="Why now" value={item.why_now || "—"}/><Metric name="Risk" value={item.risk || "—"}/><Metric name="Horizon" value={item.horizon || "—"}/><Metric name="Confidence" value={percent(item.confidence)}/></div>
 
-    {news.source_url && <div className="card-footer"><span>Evidence: {news.source || "market source"}</span><a href={news.source_url} target="_blank" rel="noreferrer">Read source →</a></div>}
+    <div className="evidence-heading"><h4>Evidence stack</h4><span>Intelligence + fundamentals + AI/ML</span></div>
+    <div className="evidence-grid">
+      <section><h5>Fundamentals</h5><div className="metric-grid"><Metric name="P/E" value={f.pe ?? "—"}/><Metric name="ROE" value={percent(f.roe)}/><Metric name="Debt / Equity" value={f.debt_to_equity ?? "—"}/><Metric name="Profit margin" value={percent(f.profit_margin)}/><Metric name="Revenue growth" value={percent(f.revenue_growth)}/><Metric name="Earnings growth" value={percent(f.earnings_growth)}/></div><div className="score-line">Fundamental quality <b>{Number(item.fundamental_score || 0).toFixed(0)}/100</b></div></section>
+      <section><h5>AI / ML prediction</h5><div className="prediction"><Metric name="5D expected" value={<b className={num(item.predicted_5d) >= 0 ? "positive" : "negative"}>{pct(item.predicted_5d)}</b>}/><Metric name="20D expected" value={<b className={num(item.predicted_20d) >= 0 ? "positive" : "negative"}>{pct(item.predicted_20d)}</b>}/><Metric name="Signal" value={item.model_signal || "—"}/><Metric name="Model score" value={`${Number(item.model_score || 0).toFixed(0)}/100`}/></div><div className="score-line">Opportunity intelligence <b>{Number(item.evidence?.opportunity_score || item.score || 0).toFixed(0)}/100</b></div></section>
+    </div>
+
+    <div className="entry"><div><span>CURRENT PRICE</span><strong>{money(item.current_price)}</strong></div><div><span>PREFERRED ENTRY / ACCUMULATION</span><strong>{item.entry_low && item.entry_high ? `${money(item.entry_low)} – ${money(item.entry_high)}` : "Awaiting fresh price"}</strong></div><div><span>THESIS INVALIDATION</span><p>{item.invalidation}</p></div></div>
+    {n.source_url && <div className="rec-footer"><span>Evidence: {n.source || "source"}</span><a href={n.source_url} target="_blank" rel="noreferrer">Read evidence →</a></div>}
   </article>;
 }
 
 function App() {
   const [recommendations, setRecommendations] = useState([]);
   const [news, setNews] = useState([]);
-  const [categories, setCategories] = useState({});
-  const [generatedAt, setGeneratedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
+  const [updated, setUpdated] = useState(null);
 
   async function load() {
     try {
       setError("");
-      const [recData, intelligence] = await Promise.all([getRecommendations(5), getIntelligenceOverview(12)]);
-      setRecommendations(recData.recommendations || []);
-      setGeneratedAt(recData.generated_at);
-      setNews(intelligence.news || []);
-      setCategories(intelligence.categories || {});
+      const [r, i] = await Promise.all([getRecommendations(5), getIntelligenceOverview(20)]);
+      setRecommendations(r.recommendations || []);
+      setNews(i.news || []);
+      setUpdated(r.generated_at);
     } catch (e) {
       console.error(e);
-      setError("StockAgent could not load live intelligence. Make sure the backend is running.");
+      setError("Unable to load live intelligence. Check that the StockAgent backend is running.");
     } finally { setLoading(false); }
   }
 
-  useEffect(() => { load(); const timer = setInterval(load, 60_000); return () => clearInterval(timer); }, []);
+  useEffect(() => { load(); const t = setInterval(load, 60_000); return () => clearInterval(t); }, []);
 
-  async function scan() {
+  async function analyze() {
     try { setRunning(true); setError(""); await runLiveAgent(); await load(); }
-    catch (e) { console.error(e); setError("Live intelligence scan failed. Check the backend console."); }
+    catch (e) { console.error(e); setError("Analysis failed. Check the backend console."); }
     finally { setRunning(false); }
   }
 
+  const groups = useMemo(() => {
+    const map = new Map();
+    news.forEach((item) => {
+      const key = item.sector || item.category || "Other market intelligence";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(item);
+    });
+    return [...map.entries()];
+  }, [news]);
+
   return <div className="app">
-    <header><div className="brand"><div className="logo">S</div><div><h1>StockAgent</h1><p>AI-powered Indian stock intelligence</p></div></div><button className="scan" onClick={scan} disabled={running}>{running ? "Analyzing…" : "↻ Analyze now"}</button></header>
+    <header><div className="brand"><div className="logo">S</div><div><h1>StockAgent</h1><p>Real-world intelligence → stocks worth considering</p></div></div><button className="analyze" onClick={analyze} disabled={running}>{running ? "Analyzing…" : "Analyze now"}</button></header>
     <main>
-      <section className="intro"><div><div className="live"><i/> LIVE INTELLIGENCE</div><h2>What matters in the market <span>right now.</span></h2><p>StockAgent turns real-world events and news into a small number of evidence-backed stocks to consider. It does the filtering and reasoning; you get the shortlist.</p></div><div className="updated">{generatedAt ? `Updated ${new Date(generatedAt).toLocaleTimeString()}` : "Analyzing…"}</div></section>
+      <section className="hero"><div><span className="eyebrow"><i/> LIVE MARKET INTELLIGENCE</span><h2>What matters <em>right now</em>.</h2><p>StockAgent filters the noise. It connects news and real-world events to sectors, companies, fundamentals and AI/ML predictions—then gives you a small shortlist to consider.</p></div><div className="refresh">{updated ? `Updated ${new Date(updated).toLocaleTimeString()}` : "Loading intelligence"}</div></section>
       {error && <div className="error">{error}</div>}
 
-      <section className="news-section">
-        <div className="section-title"><div><h3>News & market intelligence</h3><p>Recent events StockAgent is watching and how they may affect the real economy.</p></div><span>{news.length} signals</span></div>
-        <div className="category-strip">{Object.entries(categories).map(([name, count]) => <span key={name}>{label(name)} <b>{count}</b></span>)}</div>
-        {loading ? <div className="empty">Loading live intelligence…</div> : news.length ? <div className="news-grid">{news.map((item) => <NewsCard key={item.event_id} item={item} />)}</div> : <div className="empty"><strong>No recent news events have been converted into market intelligence yet.</strong><p>Run Analyze now to ingest and interpret the latest available information.</p></div>}
+      <section className="intel-section">
+        <div className="section-head"><div><span className="eyebrow">01 · MARKET INTELLIGENCE</span><h3>News, organized by sector</h3><p>Not just headlines. Each event is translated into the sector it may affect and its real-world consequence.</p></div><b>{news.length} signals</b></div>
+        {loading ? <div className="empty">Loading intelligence…</div> : groups.length ? <div className="sector-groups">{groups.map(([sector, items]) => <div className="sector-group" key={sector}><div className="sector-head"><h4>{label(sector)}</h4><span>{items.length} {items.length === 1 ? "event" : "events"}</span></div><div className="news-grid">{items.map((item, i) => <NewsCard key={`${item.event_id || item.title}-${i}`} item={item}/>)}</div></div>)}</div> : <div className="empty"><strong>No market intelligence ready yet.</strong><p>Run Analyze now to ingest and interpret recent events.</p></div>}
       </section>
 
-      <section className="recommendations">
-        <div className="section-title"><div><h3>Stocks worth considering</h3><p>Maximum 5 ideas. These are the output of the intelligence pipeline—not a market-wide stock list.</p></div><span>{recommendations.length} ideas</span></div>
-        {loading ? <div className="empty">Building recommendations…</div> : recommendations.length === 0 ? <div className="empty"><strong>No high-conviction recommendation yet.</strong><p>News can be important without creating a good entry. StockAgent only shows ideas when the evidence supports consideration.</p><button className="secondary" onClick={scan} disabled={running}>{running ? "Analyzing…" : "Analyze now"}</button></div> : recommendations.map((item) => <RecommendationCard key={`${item.symbol}-${item.rank}`} item={item} />)}
+      <section className="ideas-section">
+        <div className="section-head"><div><span className="eyebrow">02 · THE OUTPUT</span><h3>Stocks worth considering</h3><p>Only the few ideas that survive the evidence stack. This is not a market-wide stock list.</p></div><b>TOP {recommendations.length || 0}</b></div>
+        {loading ? <div className="empty">Building recommendations…</div> : recommendations.length ? recommendations.map((item) => <Recommendation key={`${item.symbol}-${item.rank}`} item={item}/>) : <div className="empty"><strong>No high-conviction stock recommendation yet.</strong><p>An important news event does not automatically mean a stock is attractive. StockAgent waits for enough supporting evidence.</p><button className="secondary" onClick={analyze} disabled={running}>{running ? "Analyzing…" : "Analyze now"}</button></div>}
       </section>
 
-      <section className="method"><h3>How StockAgent reaches the shortlist</h3><div className="method-flow"><span>News & events</span><b>→</b><span>Real-world impact</span><b>→</b><span>Sector / company exposure</span><b>→</b><span>Fundamentals</span><b>→</b><span>AI / ML prediction</span><b>→</b><strong>3–5 stocks to consider</strong></div></section>
+      <section className="logic"><span className="eyebrow">HOW THE DECISION IS MADE</span><div><strong>News</strong><i>→</i><strong>Real-world effect</strong><i>→</i><strong>Sector exposure</strong><i>→</i><strong>Fundamentals</strong><i>→</i><strong>AI / ML</strong><i>→</i><strong>Few stocks</strong></div></section>
     </main>
   </div>;
 }
