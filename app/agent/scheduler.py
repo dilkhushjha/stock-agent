@@ -1,40 +1,53 @@
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.agent.orchestrator import MarketAgent
 from app.data.database import SessionLocal
+from app.intelligence.broad_universe_cycle import DEFAULT_BATCH_SIZE, predict_stock_batch
 from app.intelligence.evaluator import PredictionEvaluator
 from app.intelligence.alert_engine import OpportunityAlertEngine
 from app.intelligence.market_data_provider import YahooFinanceProvider
 from app.intelligence.market_data_sync import MarketDataSyncService
-from app.ml.prediction_engine import MLPredictionEngine
 from app.ml.train import train as train_model
 from app.models.event import MarketEvent
+from app.models.stock import Stock
 
 
 agent = MarketAgent()
 scheduler = BackgroundScheduler()
 market_data_provider = YahooFinanceProvider()
+universe_cursor = 0
+
+
+def _next_universe_batch():
+    global universe_cursor
+    db = SessionLocal()
+    try:
+        total = db.scalar(select(func.count(Stock.id)).where(
+            Stock.is_active.is_(True), Stock.exchange == "NSE"
+        )) or 0
+        if total == 0:
+            return 0, 0
+        offset = universe_cursor % total
+        universe_cursor = (offset + DEFAULT_BATCH_SIZE) % total
+        return offset, total
+    finally:
+        db.close()
 
 
 def start_scheduler():
     scheduler.add_job(agent.run_news_cycle, trigger="interval", minutes=5, id="news_cycle", replace_existing=True, max_instances=1, coalesce=True)
     scheduler.add_job(run_live_cycle, trigger="interval", minutes=15, id="live_intelligence_cycle", replace_existing=True, max_instances=1, coalesce=True)
     scheduler.add_job(run_evaluation, trigger="interval", minutes=30, id="prediction_evaluation", replace_existing=True, max_instances=1, coalesce=True)
-
-    # Re-train once per week from the accumulated broad-universe history.
-    # Predictions remain frequent; training is intentionally much less frequent.
     scheduler.add_job(retrain_model_cycle, trigger="interval", days=7, id="model_retraining", replace_existing=True, max_instances=1, coalesce=True)
-
     scheduler.add_job(agent.run_news_cycle, trigger="date", run_date=datetime.utcnow() + timedelta(seconds=5), id="news_initial", replace_existing=True)
     scheduler.add_job(run_live_cycle, trigger="date", run_date=datetime.utcnow() + timedelta(seconds=15), id="live_initial", replace_existing=True)
-
     scheduler.start()
     print("[SCHEDULER] Market Agent started.")
     print("[SCHEDULER] News ingestion + event analysis: every 5 minutes.")
-    print("[SCHEDULER] Full market intelligence cycle: every 15 minutes.")
+    print(f"[SCHEDULER] Broad NSE market/ML scan: {DEFAULT_BATCH_SIZE} stocks per 15-minute cycle, rotating continuously.")
     print("[SCHEDULER] Prediction evaluation: every 30 minutes.")
     print("[SCHEDULER] Model retraining: every 7 days.")
 
@@ -57,38 +70,23 @@ def run_evaluation():
 
 
 def retrain_model_cycle():
-    """Re-train from accumulated broad-universe history once per week."""
     print("[RETRAIN] Starting recurrent model training...")
     try:
         result = train_model()
-        print(
-            "[RETRAIN] Complete: "
-            f"stocks={result['training_stocks']}, "
-            f"rows={result['training_rows']}, "
-            f"version={result['model_version']}"
-        )
+        print(f"[RETRAIN] Complete: stocks={result['training_stocks']}, rows={result['training_rows']}, version={result['model_version']}")
         return result
     except Exception as exc:
-        # Never take the live prediction service down because a retraining run failed.
-        # The previous model artifact remains available to the prediction engine.
         print(f"[RETRAIN] Failed; keeping previous model artifact: {exc}")
         return {"status": "failed", "error": str(exc)}
 
 
-def run_market_data_sync():
-    """Refresh only recent OHLCV during live operation."""
-    print("[MARKET DATA] Synchronizing recent prices...")
+def run_market_data_sync(offset: int, batch_size: int):
+    print(f"[MARKET DATA] Synchronizing universe batch offset={offset}, size={batch_size}...")
     db = SessionLocal()
     try:
         service = MarketDataSyncService(provider=market_data_provider)
-        result = service.sync(db=db, history_days=5, workers=2)
-        print(
-            "[MARKET DATA] "
-            f"Processed={result['requested_stocks']} "
-            f"Succeeded={result['successful_stocks']} "
-            f"Failed={result['failed_stocks']} "
-            f"Inserted={result['inserted_rows']}"
-        )
+        result = service.sync(db=db, history_days=5, workers=2, offset=offset, limit=batch_size)
+        print(f"[MARKET DATA] Processed={result['requested_stocks']} Succeeded={result['successful_stocks']} Failed={result['failed_stocks']} Inserted={result['inserted_rows']}")
         return result
     except Exception as exc:
         print(f"[MARKET DATA] Sync failed: {exc}")
@@ -97,17 +95,13 @@ def run_market_data_sync():
         db.close()
 
 
-def run_ml_prediction_cycle():
-    """Run the currently promoted model against the newest available data."""
-    print("[ML] Running live prediction cycle...")
+def run_ml_prediction_cycle(offset: int, batch_size: int):
+    print(f"[ML] Running prediction batch offset={offset}, size={batch_size}...")
     db = SessionLocal()
     try:
-        engine = MLPredictionEngine(db)
-        engine.load_model_artifact()
-        results = engine.predict_all()
-        successful = len(results)
-        print(f"[ML] Predictions completed: {successful}")
-        return {"successful": successful, "results": results}
+        result = predict_stock_batch(db, offset=offset, batch_size=batch_size)
+        print(f"[ML] Predictions completed: {result['successful']} successful, {result['failed']} failed.")
+        return result
     except Exception as exc:
         print(f"[ML] Prediction cycle failed: {exc}")
         return {"successful": 0, "error": str(exc)}
@@ -116,12 +110,13 @@ def run_ml_prediction_cycle():
 
 
 def refresh_opportunities():
-    """Re-score recent events against the newest market data and predictions."""
     print("[OPPORTUNITY] Refreshing recent opportunities...")
     db = SessionLocal()
     try:
         since = datetime.utcnow() - timedelta(days=7)
-        events = db.scalars(select(MarketEvent).where(MarketEvent.created_at >= since).order_by(MarketEvent.created_at.desc()).limit(100)).all()
+        events = db.scalars(select(MarketEvent).where(
+            MarketEvent.created_at >= since
+        ).order_by(MarketEvent.created_at.desc()).limit(100)).all()
         created = updated = 0
         for event in events:
             try:
@@ -140,21 +135,17 @@ def refresh_opportunities():
 
 
 def run_live_cycle():
-    """Run the complete recurring market-intelligence pipeline in order."""
-    print("\n[LIVE CYCLE] Starting full intelligence cycle...")
+    print("\n[LIVE CYCLE] Starting rotating full-universe intelligence cycle...")
     started = datetime.utcnow()
-    market = run_market_data_sync()
-    predictions = run_ml_prediction_cycle()
+    offset, total = _next_universe_batch()
+    batch_size = min(DEFAULT_BATCH_SIZE, total) if total else DEFAULT_BATCH_SIZE
+    market = run_market_data_sync(offset, batch_size)
+    predictions = run_ml_prediction_cycle(offset, batch_size)
     opportunities = refresh_opportunities()
     elapsed = (datetime.utcnow() - started).total_seconds()
-    print(
-        "[LIVE CYCLE] Complete: "
-        f"market_success={market.get('successful_stocks', 0)}, "
-        f"predictions={predictions.get('successful', 0)}, "
-        f"events={opportunities.get('events', 0)}, "
-        f"elapsed={elapsed:.1f}s"
-    )
+    print(f"[LIVE CYCLE] Complete: batch={offset}:{offset + batch_size}/{total}, market_success={market.get('successful_stocks', 0)}, predictions={predictions.get('successful', 0)}, events={opportunities.get('events', 0)}, elapsed={elapsed:.1f}s")
     return {
+        "universe": {"offset": offset, "batch_size": batch_size, "total": total},
         "market": market,
         "predictions": {"successful": predictions.get("successful", 0), "error": predictions.get("error")},
         "opportunities": opportunities,
