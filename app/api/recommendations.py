@@ -7,8 +7,10 @@ from sqlalchemy.orm import Session
 from app.data.database import get_db
 from app.intelligence.causal_intelligence import CausalIntelligence
 from app.intelligence.exposure import ExposureMappingService
+from app.intelligence.historical_analogues import find_historical_analogues
 from app.intelligence.universe_recommendation_engine import UniverseRecommendationEngine
 from app.models.event import MarketEvent
+from app.models.stock import Stock
 
 router = APIRouter(prefix="/recommendations", tags=["Recommendations"])
 
@@ -19,8 +21,6 @@ def get_recommendations(
     db: Session = Depends(get_db),
 ):
     # IMPORTANT: limit controls the output, not the search universe.
-    # The engine scans the active NSE universe first and only then selects the
-    # strongest ideas.
     recommendations = UniverseRecommendationEngine.build(db, limit=limit)
 
     for item in recommendations:
@@ -40,6 +40,33 @@ def get_recommendations(
         else:
             item["sector_priority"] = "SECONDARY"
             item["exposure_strength"] = None
+
+        stock = db.scalar(select(Stock).where(Stock.symbol == item.get("symbol")))
+        item["historical_analogue"] = find_historical_analogues(
+            db,
+            event,
+            stock_id=stock.id if stock else None,
+            limit=8,
+        )
+
+        analogue = item["historical_analogue"]
+        summary = analogue.get("summary") if analogue else None
+        if summary:
+            item["historical_evidence"] = {
+                "sample_count": analogue.get("sample_count", 0),
+                "median_5d_return_pct": summary.get("median_5d_return_pct"),
+                "average_5d_return_pct": summary.get("average_5d_return_pct"),
+                "positive_5d_rate_pct": summary.get("positive_5d_rate_pct"),
+                "median_10d_return_pct": summary.get("median_10d_return_pct"),
+            }
+        else:
+            item["historical_evidence"] = {
+                "sample_count": analogue.get("sample_count", 0) if analogue else 0,
+                "median_5d_return_pct": None,
+                "average_5d_return_pct": None,
+                "positive_5d_rate_pct": None,
+                "median_10d_return_pct": None,
+            }
 
     priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
     recommendations.sort(
