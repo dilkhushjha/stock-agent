@@ -21,8 +21,9 @@ class RecommendationEngine:
     def build(db, limit: int = 5) -> list[dict]:
         recommendations = []
         seen = set()
+        now = datetime.utcnow()
+        cutoff = now - timedelta(days=14)
 
-        # 1) Strong event-driven opportunities remain the first priority.
         alerts = db.scalars(
             select(OpportunityAlert)
             .where(OpportunityAlert.action.in_(["BUY", "WATCH"]))
@@ -32,22 +33,19 @@ class RecommendationEngine:
         for alert in alerts:
             if alert.symbol in seen:
                 continue
-            item = RecommendationEngine._from_stock(db, alert.symbol, alert=alert)
+            item = RecommendationEngine._from_stock(db, alert.symbol, alert=alert, cutoff=cutoff)
             if item:
                 recommendations.append(item)
                 seen.add(alert.symbol)
             if len(recommendations) >= limit:
                 return RecommendationEngine._rank(recommendations)[:limit]
 
-        # 2) Important: do NOT equate "no OpportunityAlert" with "no stock".
-        # Scan the wider active universe and use recent sector/event/news evidence,
-        # fundamentals, ML inference and market behaviour to produce lower-priority
-        # candidates when the evidence is weaker but still useful.
+        # MarketEvent uses event_date in the current schema (not event_time).
         recent_events = db.scalars(
             select(MarketEvent)
-            .where(MarketEvent.event_time >= datetime.utcnow() - timedelta(days=14))
-            .order_by(MarketEvent.event_time.desc())
-            .limit(100)
+            .where(MarketEvent.event_date >= cutoff)
+            .order_by(MarketEvent.event_date.desc())
+            .limit(300)
         ).all()
         recent_sectors = {str(e.sector).strip().upper() for e in recent_events if e.sector}
 
@@ -58,19 +56,21 @@ class RecommendationEngine:
         for stock in stocks:
             if stock.symbol in seen:
                 continue
-            item = RecommendationEngine._from_stock(db, stock.symbol, recent_sectors=recent_sectors)
+            item = RecommendationEngine._from_stock(
+                db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff
+            )
             if item and item["score"] >= 30:
                 fallback.append(item)
 
         fallback.sort(key=lambda x: (-x["score"], x["symbol"]))
         recommendations.extend(fallback[: max(0, limit - len(recommendations))])
 
-        # 3) If the live evidence is weak, still expose the best LOW-priority
-        # candidate rather than leaving the user with an empty recommendation panel.
         if not recommendations and stocks:
             best = None
             for stock in stocks:
-                item = RecommendationEngine._from_stock(db, stock.symbol, recent_sectors=recent_sectors)
+                item = RecommendationEngine._from_stock(
+                    db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff
+                )
                 if item and (best is None or item["score"] > best["score"]):
                     best = item
             if best:
@@ -79,7 +79,8 @@ class RecommendationEngine:
         return RecommendationEngine._rank(recommendations)[:limit]
 
     @staticmethod
-    def _from_stock(db, symbol: str, alert=None, recent_sectors=None):
+    def _from_stock(db, symbol: str, alert=None, recent_sectors=None, cutoff=None):
+        cutoff = cutoff or (datetime.utcnow() - timedelta(days=14))
         stock = db.scalar(select(Stock).where(Stock.symbol == symbol))
         if not stock:
             return None
@@ -93,13 +94,13 @@ class RecommendationEngine:
 
         if not event:
             sector = (stock.sector or "").strip().upper()
-            event = db.scalars(
+            events = db.scalars(
                 select(MarketEvent)
-                .where(MarketEvent.sector.is_not(None), MarketEvent.event_time >= datetime.utcnow() - timedelta(days=14))
-                .order_by(MarketEvent.event_time.desc())
-                .limit(100)
+                .where(MarketEvent.event_date >= cutoff, MarketEvent.sector.is_not(None))
+                .order_by(MarketEvent.event_date.desc())
+                .limit(300)
             ).all()
-            event = next((e for e in event if str(e.sector).strip().upper() == sector), None)
+            event = next((e for e in events if str(e.sector).strip().upper() == sector), None)
             if event and event.news_id:
                 news = db.scalar(select(NewsArticle).where(NewsArticle.id == event.news_id))
 
@@ -119,7 +120,7 @@ class RecommendationEngine:
         intelligence_score = float(alert.opportunity_score) if alert else RecommendationEngine._sector_intelligence_score(event, news, recent_sectors, stock)
         model_score = RecommendationEngine._model_score(prediction)
         market_score = RecommendationEngine._market_score(market)
-        evidence_score = RecommendationEngine._evidence_score(db, event, news, stock.sector)
+        evidence_score = RecommendationEngine._evidence_score(db, event, news, stock.sector, cutoff)
         composite = round(min(100, 0.40 * intelligence_score + 0.20 * fundamental_score + 0.18 * model_score + 0.12 * market_score + 0.10 * evidence_score), 1)
         priority = RecommendationEngine._priority(composite, intelligence_score, fundamental_score, model_score, evidence_score)
         risk = (alert.risk if alert else RecommendationEngine._risk(market, fundamentals)) or "MEDIUM"
@@ -127,55 +128,32 @@ class RecommendationEngine:
         action = "BUY" if alert and alert.action == "BUY" and composite >= 65 else "WATCH"
 
         return {
-            "rank": 0,
-            "symbol": stock.symbol,
-            "company": stock.company_name or stock.symbol,
+            "rank": 0, "symbol": stock.symbol, "company": stock.company_name or stock.symbol,
             "sector": stock.sector or (fundamentals.sector if fundamentals else None) or (event.sector if event else None),
-            "action": action,
-            "priority": priority,
+            "action": action, "priority": priority,
             "priority_label": {"HIGH": "High priority", "MEDIUM": "Medium priority", "LOW": "Low priority"}[priority],
-            "score": composite,
-            "confidence": float(alert.confidence) if alert else round(min(0.85, max(0.30, composite / 100)), 3),
-            "risk": risk,
-            "horizon": (alert.expected_horizon if alert else None) or (event.time_horizon if event else "2–6 weeks"),
-            "current_price": current_price,
-            "entry_low": entry_low,
-            "entry_high": entry_high,
-            "predicted_5d": expected_5d,
-            "predicted_20d": expected_20d,
-            "model_signal": prediction.signal if prediction else None,
-            "reason": (alert.reason if alert else RecommendationEngine._fallback_reason(event, fundamentals, prediction, market)),
-            "thesis": (alert.title if alert else (event.title if event else f"{stock.company_name or stock.symbol}: multi-factor setup")),
+            "score": composite, "confidence": float(alert.confidence) if alert else round(min(0.85, max(0.30, composite / 100)), 3),
+            "risk": risk, "horizon": (alert.expected_horizon if alert else None) or (event.time_horizon if event else "2–6 weeks"),
+            "current_price": current_price, "entry_low": entry_low, "entry_high": entry_high,
+            "predicted_5d": expected_5d, "predicted_20d": expected_20d, "model_signal": prediction.signal if prediction else None,
+            "reason": alert.reason if alert else RecommendationEngine._fallback_reason(event, fundamentals, prediction, market),
+            "thesis": alert.title if alert else (event.title if event else f"{stock.company_name or stock.symbol}: multi-factor setup"),
             "why_now": RecommendationEngine._why_now(alert, prediction, market, event),
             "invalidation": RecommendationEngine._invalidation(alert, prediction, market),
-            "fundamentals": RecommendationEngine._fundamentals(fundamentals),
-            "market": market,
-            "fundamental_score": round(fundamental_score, 1),
-            "model_score": round(model_score, 1),
-            "market_score": round(market_score, 1),
-            "evidence_score": round(evidence_score, 1),
-            "evidence": {
-                "source": (alert.source_name if alert else None) or (news.source if news else None),
-                "source_url": (alert.source_url if alert else None) or (news.url if news else None),
-                "event_id": event.id if event else (alert.event_id if alert else None),
-                "opportunity_score": alert.opportunity_score if alert else None,
-                "evidence_count": RecommendationEngine._evidence_count(db, event, news, stock.sector),
-            },
-            "news": {
-                "title": news.title if news else None,
-                "source": news.source if news else None,
-                "source_url": news.url if news else None,
-                "published_at": news.published_at.isoformat() if news and news.published_at else None,
-                "summary": news.summary if news else None,
-            },
-            "event": {
-                "title": event.title if event else None,
-                "description": event.description if event else None,
-                "sector": event.sector if event else None,
-                "direction": event.direction if event else None,
-                "impact": event.impact if event else None,
-                "horizon": event.time_horizon if event else None,
-            },
+            "fundamentals": RecommendationEngine._fundamentals(fundamentals), "market": market,
+            "fundamental_score": round(fundamental_score, 1), "model_score": round(model_score, 1),
+            "market_score": round(market_score, 1), "evidence_score": round(evidence_score, 1),
+            "evidence": {"source": (alert.source_name if alert else None) or (news.source if news else None),
+                         "source_url": (alert.source_url if alert else None) or (news.url if news else None),
+                         "event_id": event.id if event else (alert.event_id if alert else None),
+                         "opportunity_score": alert.opportunity_score if alert else None,
+                         "evidence_count": RecommendationEngine._evidence_count(db, event, news, stock.sector, cutoff)},
+            "news": {"title": news.title if news else None, "source": news.source if news else None,
+                     "source_url": news.url if news else None, "published_at": news.published_at.isoformat() if news and news.published_at else None,
+                     "summary": news.summary if news else None},
+            "event": {"title": event.title if event else None, "description": event.description if event else None,
+                      "sector": event.sector if event else None, "direction": event.direction if event else None,
+                      "impact": event.impact if event else None, "horizon": event.time_horizon if event else None},
             "created_at": (alert.created_at if alert else datetime.utcnow()).isoformat(),
         }
 
@@ -183,16 +161,13 @@ class RecommendationEngine:
     def _rank(items):
         priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
         items.sort(key=lambda x: (priority_order.get(x["priority"], 3), -x["score"]))
-        for i, item in enumerate(items, 1):
-            item["rank"] = i
+        for i, item in enumerate(items, 1): item["rank"] = i
         return items
 
     @staticmethod
     def _priority(composite, intelligence, fundamentals, model, evidence):
-        if composite >= 80 and intelligence >= 70 and fundamentals >= 60 and model >= 55 and evidence >= 55:
-            return "HIGH"
-        if composite >= 60 and intelligence >= 50 and (fundamentals >= 45 or model >= 50):
-            return "MEDIUM"
+        if composite >= 80 and intelligence >= 70 and fundamentals >= 60 and model >= 55 and evidence >= 55: return "HIGH"
+        if composite >= 60 and intelligence >= 50 and (fundamentals >= 45 or model >= 50): return "MEDIUM"
         return "LOW"
 
     @staticmethod
@@ -223,16 +198,18 @@ class RecommendationEngine:
         volumes = [float(r.volume) for r in rows if r.volume is not None and r.volume > 0]
         if not closes: return {}
         current = closes[-1]
-        def ret(days):
-            return (current / closes[-days - 1] - 1) * 100 if len(closes) > days and closes[-days - 1] else None
+        def ret(days): return (current / closes[-days - 1] - 1) * 100 if len(closes) > days and closes[-days - 1] else None
         daily = [(closes[i] / closes[i-1] - 1) for i in range(1, len(closes)) if closes[i-1]]
-        recent = daily[-20:]
-        mean = sum(recent) / len(recent) if recent else 0
+        recent = daily[-20:]; mean = sum(recent) / len(recent) if recent else 0
         vol20 = (sum((x-mean)**2 for x in recent)/len(recent))**0.5 * sqrt(252) * 100 if recent else None
         high52, low52 = max(closes[-252:]), min(closes[-252:])
-        avg20 = sum(volumes[-20:])/min(20, len(volumes)) if volumes else None
-        latest = volumes[-1] if volumes else None
-        return {"current_price": round(current,2), "return_1d_pct": round(ret(1),2) if ret(1) is not None else None, "return_5d_pct": round(ret(5),2) if ret(5) is not None else None, "return_20d_pct": round(ret(20),2) if ret(20) is not None else None, "return_60d_pct": round(ret(60),2) if ret(60) is not None else None, "volatility_20d_annualized_pct": round(vol20,2) if vol20 is not None else None, "high_52w": round(high52,2), "low_52w": round(low52,2), "distance_from_52w_high_pct": round((current/high52-1)*100,2) if high52 else None, "distance_from_52w_low_pct": round((current/low52-1)*100,2) if low52 else None, "volume_vs_20d_avg": round(latest/avg20,2) if latest and avg20 else None, "data_points": len(rows), "data_as_of": rows[-1].timestamp.isoformat() if rows[-1].timestamp else None}
+        avg20 = sum(volumes[-20:])/min(20, len(volumes)) if volumes else None; latest = volumes[-1] if volumes else None
+        return {"current_price": round(current,2), "return_1d_pct": round(ret(1),2) if ret(1) is not None else None,
+                "return_5d_pct": round(ret(5),2) if ret(5) is not None else None, "return_20d_pct": round(ret(20),2) if ret(20) is not None else None,
+                "return_60d_pct": round(ret(60),2) if ret(60) is not None else None, "volatility_20d_annualized_pct": round(vol20,2) if vol20 is not None else None,
+                "high_52w": round(high52,2), "low_52w": round(low52,2), "distance_from_52w_high_pct": round((current/high52-1)*100,2) if high52 else None,
+                "distance_from_52w_low_pct": round((current/low52-1)*100,2) if low52 else None, "volume_vs_20d_avg": round(latest/avg20,2) if latest and avg20 else None,
+                "data_points": len(rows), "data_as_of": rows[-1].timestamp.isoformat() if rows[-1].timestamp else None}
 
     @staticmethod
     def _market_score(m):
@@ -246,19 +223,19 @@ class RecommendationEngine:
         return max(0,min(100,score))
 
     @staticmethod
-    def _evidence_count(db,event,news,sector=None):
+    def _evidence_count(db,event,news,sector=None,cutoff=None):
+        cutoff = cutoff or (datetime.utcnow()-timedelta(days=14))
         count=1 if news else 0
-        cutoff=(news.published_at-timedelta(days=14)) if news and news.published_at else datetime.utcnow()-timedelta(days=14)
         if event:
-            related=db.scalars(select(MarketEvent).where(MarketEvent.id!=event.id,MarketEvent.event_time>=cutoff)).all()
+            related=db.scalars(select(MarketEvent).where(MarketEvent.id!=event.id,MarketEvent.event_date>=cutoff)).all()
             if sector: related=[e for e in related if e.sector and str(e.sector).strip().upper()==str(sector).strip().upper()]
             count += len(related)
         if sector:
             count += db.scalar(select(func.count(NewsArticle.id)).where(NewsArticle.created_at>=cutoff)) or 0
-        return min(20,count)
+        return min(50,count)
 
     @staticmethod
-    def _evidence_score(db,event,news,sector=None): return min(100.0,40+RecommendationEngine._evidence_count(db,event,news,sector)*6)
+    def _evidence_score(db,event,news,sector=None,cutoff=None): return min(100.0,40+RecommendationEngine._evidence_count(db,event,news,sector,cutoff)*3)
 
     @staticmethod
     def _entry_zone(current,market,risk):
