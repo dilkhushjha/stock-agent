@@ -8,18 +8,21 @@ from app.models.stock import Stock
 
 
 class ExposureMappingService:
-
     @staticmethod
     def normalize_entity(entity: str) -> str:
-
-        entity = entity.upper().strip()
+        entity = " ".join(entity.upper().strip().split())
 
         aliases = {
             "SUGARCANE": "SUGAR",
+            "SUGAR CANE": "SUGAR",
+            "SUGARCANE HARVEST": "SUGAR",
+            "SUGARCANE CROP": "SUGAR",
+            "SUGAR HARVEST": "SUGAR",
             "SUGAR PRICES": "SUGAR",
             "SUGAR PRICE": "SUGAR",
             "CRUDE": "CRUDE OIL",
             "OIL": "CRUDE OIL",
+            "CRUDE OIL PRICES": "CRUDE OIL",
             "STEEL PRICES": "STEEL",
             "STEEL PRICE": "STEEL",
             "INTEREST RATE": "INTEREST RATES",
@@ -29,26 +32,15 @@ class ExposureMappingService:
         return aliases.get(entity, entity)
 
     @staticmethod
-    def map_event(
-        db: Session,
-        event_id: int,
-    ) -> dict:
-
+    def map_event(db: Session, event_id: int) -> dict:
         event = db.scalar(
-            select(MarketEvent).where(
-                MarketEvent.id == event_id
-            )
+            select(MarketEvent).where(MarketEvent.id == event_id)
         )
 
         if not event:
-            raise ValueError(
-                f"Event {event_id} not found."
-            )
+            raise ValueError(f"Event {event_id} not found.")
 
-        entity = ExposureMappingService.normalize_entity(
-            event.entity or ""
-        )
-
+        entity = ExposureMappingService.normalize_entity(event.entity or "")
         exposure_group = EXPOSURE_MAP.get(entity)
 
         if not exposure_group:
@@ -62,22 +54,17 @@ class ExposureMappingService:
         exposures = []
 
         for symbol, config in exposure_group.items():
-
             stock = db.scalar(
-                select(Stock).where(
-                    Stock.symbol == symbol
-                )
+                select(Stock).where(Stock.symbol == symbol)
             )
 
             if not stock:
-
                 stock = Stock(
                     symbol=symbol,
                     yahoo_symbol=config["yahoo_symbol"],
                     company_name=symbol,
                     is_active=True,
                 )
-
                 db.add(stock)
                 db.commit()
                 db.refresh(stock)
@@ -90,28 +77,21 @@ class ExposureMappingService:
             )
 
             if not existing:
-
-                exposure = StockExposure(
-                    stock_id=stock.id,
-                    entity=entity,
-                    exposure_type="DIRECT",
-                    exposure_strength=config[
-                        "exposure_strength"
-                    ],
-                    direction=config["direction"],
+                db.add(
+                    StockExposure(
+                        stock_id=stock.id,
+                        entity=entity,
+                        exposure_type="DIRECT",
+                        exposure_strength=config["exposure_strength"],
+                        direction=config["direction"],
+                    )
                 )
 
-                db.add(exposure)
-
-            exposures.append(
-                {
-                    "symbol": symbol,
-                    "exposure_strength": config[
-                        "exposure_strength"
-                    ],
-                    "direction": config["direction"],
-                }
-            )
+            exposures.append({
+                "symbol": symbol,
+                "exposure_strength": config["exposure_strength"],
+                "direction": config["direction"],
+            })
 
         db.commit()
 
