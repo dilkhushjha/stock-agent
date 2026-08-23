@@ -1,102 +1,53 @@
 from sqlalchemy import select
 
 from app.data.database import SessionLocal
-
-from app.services.news_ingestion import (
-    NewsIngestionService,
-)
-
+from app.intelligence.alert_engine import OpportunityAlertEngine
+from app.intelligence.events.event_service import EventIntelligenceService
+from app.intelligence.relevance import NewsRelevance
 from app.models.news import NewsArticle
-
-from app.intelligence.relevance import (
-    NewsRelevance,
-)
-
-from app.intelligence.event_extractor import (
-    EventExtractor,
-)
-
-from app.intelligence.signal_engine import (
-    SignalEngine,
-)
+from app.services.news_ingestion import NewsIngestionService
 
 
 class MarketAgent:
+    """Runs the proactive event -> impact -> opportunity pipeline."""
 
     def __init__(self):
-
-        self.news_service = (
-            NewsIngestionService()
-        )
-
-        self.signal_engine = SignalEngine()
+        self.news_service = NewsIngestionService()
+        self.event_service = EventIntelligenceService()
 
     def run_news_cycle(self):
-
-        print(
-            "\n[AGENT] Starting news cycle..."
-        )
-
+        print("\n[AGENT] Starting intelligence cycle...")
         db = SessionLocal()
 
         try:
-
             result = self.news_service.run(db)
+            print(f"[AGENT] Collected: {result['collected']}")
+            print(f"[AGENT] New articles: {result['inserted']}")
 
-            print(
-                f"[AGENT] Collected: "
-                f"{result['collected']}"
-            )
-
-            print(
-                f"[AGENT] New articles: "
-                f"{result['inserted']}"
-            )
-
-            self.process_pending_news(db)
-
+            result["opportunities"] = self.process_pending_news(db)
             return result
 
         except Exception as exc:
-
-            print(
-                f"[AGENT ERROR] {exc}"
-            )
-
-            return {
-                "error": str(exc)
-            }
-
+            print(f"[AGENT ERROR] {exc}")
+            return {"error": str(exc)}
         finally:
-
             db.close()
 
-    def process_pending_news(
-        self,
-        db,
-    ):
-
+    def process_pending_news(self, db):
         articles = db.scalars(
             select(NewsArticle)
-            .where(
-                NewsArticle.is_processed
-                == False
-            )
-            .order_by(
-                NewsArticle.published_at.desc()
-            )
+            .where(NewsArticle.is_processed == False)
+            .order_by(NewsArticle.published_at.desc())
             .limit(10)
         ).all()
 
-        print(
-            f"[AGENT] Pending articles: "
-            f"{len(articles)}"
-        )
+        print(f"[AGENT] Pending articles: {len(articles)}")
+
+        total_alerts = 0
+        events_created = 0
 
         for article in articles:
-
             try:
-
                 relevance = NewsRelevance.score(
                     {
                         "title": article.title,
@@ -105,94 +56,37 @@ class MarketAgent:
                 )
 
                 if relevance < 2:
-
                     article.is_processed = True
-
                     continue
 
-                print(
-                    f"\n[AGENT] Processing:"
-                    f" {article.title}"
+                event_result = self.event_service.process_article(
+                    db=db,
+                    article_id=article.id,
                 )
+                event_id = event_result["event_id"]
 
-                event = EventExtractor.extract(
-                    title=article.title,
-                    content=article.content or "",
+                if event_result.get("status") == "processed":
+                    events_created += 1
+
+                alert_result = OpportunityAlertEngine.generate_for_event(
+                    db=db,
+                    event_id=event_id,
                 )
-
-                if event.get(
-                    "is_market_relevant"
-                ) is not True:
-
-                    print(
-                        "[AGENT] "
-                        "Not market relevant."
-                    )
-
-                    article.is_processed = True
-
-                    continue
+                created = alert_result.get("alerts_created", 0)
+                total_alerts += created
 
                 print(
-                    "[AGENT] Event:"
-                    f" {event.get('event_type')}"
+                    f"[AGENT] {article.title[:80]} -> "
+                    f"event={event_id}, alerts={created}"
                 )
-
-                print(
-                    "[AGENT] Factor:"
-                    f" {event.get('factor')}"
-                )
-
-                print(
-                    "[AGENT] Direction:"
-                    f" {event.get('direction')}"
-                )
-
-                factor = event.get(
-                    "factor"
-                )
-
-                direction = event.get(
-                    "direction"
-                )
-
-                if (
-                    factor
-                    and factor != "OTHER"
-                    and direction
-                    in ["UP", "DOWN"]
-                ):
-
-                    signals = (
-                        self.signal_engine.generate(
-                            db=db,
-                            factor=factor,
-                            direction=direction,
-                        )
-                    )
-
-                    print(
-                        "[AGENT] Signals generated:"
-                        f" {len(signals)}"
-                    )
-
-                    for signal in signals[:5]:
-
-                        print(
-                            f"  "
-                            f"{signal['symbol']} "
-                            f"→ "
-                            f"{signal['impact']} "
-                            f"({signal['signal_score']})"
-                        )
-
-                article.is_processed = True
 
             except Exception as exc:
-
-                print(
-                    "[AGENT] Article processing "
-                    f"failed: {exc}"
-                )
+                print(f"[AGENT] Article processing failed: {exc}")
 
         db.commit()
+
+        return {
+            "articles_processed": len(articles),
+            "events_created": events_created,
+            "alerts_created": total_alerts,
+        }
