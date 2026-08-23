@@ -26,33 +26,17 @@ def start_scheduler():
         id="news_cycle",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
     scheduler.add_job(
-        run_market_data_sync,
+        run_live_cycle,
         trigger="interval",
         minutes=15,
-        id="market_data_sync",
+        id="live_intelligence_cycle",
         replace_existing=True,
         max_instances=1,
-    )
-
-    scheduler.add_job(
-        run_ml_prediction_cycle,
-        trigger="interval",
-        minutes=15,
-        id="ml_prediction_cycle",
-        replace_existing=True,
-        max_instances=1,
-    )
-
-    scheduler.add_job(
-        refresh_opportunities,
-        trigger="interval",
-        minutes=15,
-        id="opportunity_refresh",
-        replace_existing=True,
-        max_instances=1,
+        coalesce=True,
     )
 
     scheduler.add_job(
@@ -62,22 +46,32 @@ def start_scheduler():
         id="prediction_evaluation",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
+    # Start collecting/analyzing immediately after the API comes up. The
+    # recurring jobs then keep the application live without requiring a
+    # dashboard button click.
     scheduler.add_job(
-        run_ml_prediction_cycle,
+        agent.run_news_cycle,
         trigger="date",
         run_date=datetime.utcnow() + timedelta(seconds=5),
-        id="ml_prediction_initial",
+        id="news_initial",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_live_cycle,
+        trigger="date",
+        run_date=datetime.utcnow() + timedelta(seconds=15),
+        id="live_initial",
         replace_existing=True,
     )
 
     scheduler.start()
     print("[SCHEDULER] Market Agent started.")
-    print("[SCHEDULER] News cycle: every 5 minutes.")
-    print("[SCHEDULER] Market data sync: every 15 minutes (recent window).")
-    print("[SCHEDULER] ML predictions: every 15 minutes.")
-    print("[SCHEDULER] Opportunity refresh: every 15 minutes.")
+    print("[SCHEDULER] News ingestion + event analysis: every 5 minutes.")
+    print("[SCHEDULER] Full market intelligence cycle: every 15 minutes.")
+    print("[SCHEDULER] Prediction evaluation: every 30 minutes.")
 
 
 def stop_scheduler():
@@ -98,16 +92,14 @@ def run_evaluation():
 
 
 def run_market_data_sync():
-    """Refresh only recent OHLCV during live operation.
-
-    Historical bootstrap is intentionally separate so the 24x7 scheduler does
-    not repeatedly download hundreds of days for every stock.
-    """
+    """Refresh only recent OHLCV during live operation."""
     print("[MARKET DATA] Synchronizing recent prices...")
     db = SessionLocal()
     try:
         service = MarketDataSyncService(provider=market_data_provider)
-        result = service.sync(db=db, history_days=5, workers=8)
+        # Keep live requests conservative because the provider can rate-limit
+        # bursts. Historical bootstrap remains a separate operation.
+        result = service.sync(db=db, history_days=5, workers=2)
         print(
             "[MARKET DATA] "
             f"Processed={result['requested_stocks']} "
@@ -115,8 +107,10 @@ def run_market_data_sync():
             f"Failed={result['failed_stocks']} "
             f"Inserted={result['inserted_rows']}"
         )
+        return result
     except Exception as exc:
         print(f"[MARKET DATA] Sync failed: {exc}")
+        return {"successful_stocks": 0, "error": str(exc)}
     finally:
         db.close()
 
@@ -162,7 +156,43 @@ def refresh_opportunities():
                 print(f"[OPPORTUNITY] Event {event.id} refresh failed: {exc}")
 
         print(f"[OPPORTUNITY] Events={len(events)} Created={created} Updated={updated}")
+        return {"events": len(events), "alerts_created": created, "alerts_updated": updated}
     except Exception as exc:
         print(f"[OPPORTUNITY] Refresh failed: {exc}")
+        return {"events": 0, "error": str(exc)}
     finally:
         db.close()
+
+
+def run_live_cycle():
+    """Run the complete recurring market-intelligence pipeline in order.
+
+    The order is intentional: fresh prices are loaded before ML inference,
+    and opportunities are refreshed only after both news/events and predictions
+    are available. This is the application's continuous 24x7 intelligence loop.
+    """
+    print("\n[LIVE CYCLE] Starting full intelligence cycle...")
+    started = datetime.utcnow()
+
+    market = run_market_data_sync()
+    predictions = run_ml_prediction_cycle()
+    opportunities = refresh_opportunities()
+
+    elapsed = (datetime.utcnow() - started).total_seconds()
+    print(
+        "[LIVE CYCLE] Complete: "
+        f"market_success={market.get('successful_stocks', 0)}, "
+        f"predictions={predictions.get('successful', 0)}, "
+        f"events={opportunities.get('events', 0)}, "
+        f"elapsed={elapsed:.1f}s"
+    )
+
+    return {
+        "market": market,
+        "predictions": {
+            "successful": predictions.get("successful", 0),
+            "error": predictions.get("error"),
+        },
+        "opportunities": opportunities,
+        "elapsed_seconds": elapsed,
+    }
