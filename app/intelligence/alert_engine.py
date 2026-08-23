@@ -1,6 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.intelligence.causal_impact import CausalImpactEngine
 from app.intelligence.exposure import ExposureMappingService
 from app.intelligence.signals import SignalEngine
 from app.models.alert import OpportunityAlert
@@ -14,8 +15,8 @@ class OpportunityAlertEngine:
     MIN_ALERT_SCORE = 55.0
 
     @staticmethod
-    def _risk(score: float, event: MarketEvent) -> str:
-        if score >= 75:
+    def _risk(score: float, event: MarketEvent, causal_strength: float) -> str:
+        if score >= 75 and causal_strength >= 0.6:
             return "MEDIUM"
         return "HIGH"
 
@@ -28,6 +29,20 @@ class OpportunityAlertEngine:
         if direction == "NEGATIVE" and score >= 75:
             return "AVOID"
         return "WATCH"
+
+    @staticmethod
+    def _causal_strength(causal: dict) -> float:
+        chain = causal.get("causal_chain", [])
+        if not chain:
+            return 0.0
+
+        sensitivities = [
+            float(step.get("sensitivity") or 0.5)
+            for step in chain
+        ]
+        average = sum(sensitivities) / len(sensitivities)
+        length_bonus = min(0.25, len(chain) * 0.05)
+        return min(1.0, average + length_bonus)
 
     @classmethod
     def generate_for_event(cls, db: Session, event_id: int) -> dict:
@@ -44,6 +59,8 @@ class OpportunityAlertEngine:
             return {"event_id": event_id, "alerts_created": 0, "alerts_updated": 0, "alerts": []}
 
         signal_result = SignalEngine.generate(db=db, event_id=event_id)
+        causal = CausalImpactEngine.analyze(db=db, event_id=event_id)
+        causal_strength = cls._causal_strength(causal)
         article = db.scalar(select(NewsArticle).where(NewsArticle.id == event.news_id))
 
         alerts = []
@@ -52,7 +69,14 @@ class OpportunityAlertEngine:
         confidence = float(event.confidence or 0.0)
 
         for result in signal_result["results"]:
-            score = float(result["score"])
+            market_score = float(result["score"])
+            # Causal evidence is deliberately additive, not dominant. Market
+            # behaviour still has to confirm the thesis.
+            score = round(
+                min(100.0, market_score * 0.75 + (causal_strength * 100.0) * 0.25),
+                2,
+            )
+
             existing = db.scalar(
                 select(OpportunityAlert).where(
                     OpportunityAlert.event_id == event_id,
@@ -67,22 +91,25 @@ class OpportunityAlertEngine:
                 continue
 
             action = cls._action(score, result["direction"])
+            chain_text = " → ".join(
+                [causal.get("entity", entity)]
+                + [step["to"] for step in causal.get("causal_chain", [])]
+            )
             reason = (
                 f"{event.title}. {event.description or ''} "
                 f"Event confidence: {confidence:.0%}. "
-                f"Exposure and current market behaviour produced a "
-                f"signal score of {score:.1f}/100."
+                f"Causal chain: {chain_text or 'not established'}. "
+                f"Causal strength: {causal_strength:.0%}. "
+                f"Market signal: {market_score:.1f}/100; "
+                f"combined opportunity score: {score:.1f}/100."
             ).strip()
 
             if existing:
-                # A developing event may cross the alert threshold later.
-                # Refresh the existing alert instead of creating duplicates.
-                previous_action = existing.action
                 existing.action = action
                 existing.confidence = confidence
                 existing.opportunity_score = score
                 existing.expected_horizon = event.time_horizon
-                existing.risk = cls._risk(score, event)
+                existing.risk = cls._risk(score, event, causal_strength)
                 existing.title = f"Potential {entity} opportunity: {result['symbol']}"
                 existing.reason = reason
                 existing.source_url = article.url if article else existing.source_url
@@ -100,7 +127,7 @@ class OpportunityAlertEngine:
                 confidence=confidence,
                 opportunity_score=score,
                 expected_horizon=event.time_horizon,
-                risk=cls._risk(score, event),
+                risk=cls._risk(score, event, causal_strength),
                 title=f"Potential {entity} opportunity: {result['symbol']}",
                 reason=reason,
                 source_url=article.url if article else None,
@@ -116,6 +143,7 @@ class OpportunityAlertEngine:
         return {
             "event_id": event_id,
             "entity": entity,
+            "causal_strength": causal_strength,
             "alerts_created": created_count,
             "alerts_updated": updated_count,
             "alerts": [
