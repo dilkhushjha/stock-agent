@@ -10,6 +10,7 @@ from app.models.market_relationship import MarketRelationship
 from app.models.company_exposure import CompanyExposure
 from app.models.prediction import SignalPrediction
 from app.models.ml_prediction import MLPrediction
+from app.models.alert import OpportunityAlert
 
 __all__ = [
     "Stock",
@@ -24,4 +25,5 @@ __all__ = [
     "CompanyExposure",
     "SignalPrediction",
     "MLPrediction",
+    "OpportunityAlert",
 ]
