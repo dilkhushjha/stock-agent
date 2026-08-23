@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.intelligence.causal_impact import CausalImpactEngine
 from app.intelligence.exposure import ExposureMappingService
+from app.intelligence.forward_prediction import ForwardPredictionEngine
 from app.intelligence.pricing import MarketPricingEngine
 from app.intelligence.signals import SignalEngine
 from app.models.alert import OpportunityAlert
@@ -57,6 +58,33 @@ class OpportunityAlertEngine:
             return 1.0
         return 0.70
 
+    @staticmethod
+    def _prediction_factor(prediction: dict, direction: str | None) -> float:
+        if prediction.get("status") != "OK":
+            return 0.5
+        horizons = prediction.get("predictions", [])
+        if not horizons:
+            return 0.5
+        seven_day = next((p for p in horizons if p["horizon_days"] == 7), horizons[0])
+        probability = float(seven_day.get("probability_of_direction", 0.5))
+        expected = float(seven_day.get("expected_return_percent", 0.0))
+        magnitude = min(1.0, abs(expected) / 10.0)
+        positive = str(direction).upper() in {"POSITIVE", "UP", "BULLISH", "INCREASE"}
+        directional = probability if positive else 1.0 - probability
+        return max(0.0, min(1.0, directional * 0.7 + magnitude * 0.3))
+
+    @staticmethod
+    def _prediction_summary(prediction: dict) -> str:
+        if prediction.get("status") != "OK":
+            return "Forward prediction: insufficient historical data."
+        parts = []
+        for item in prediction.get("predictions", []):
+            parts.append(
+                f"{item['horizon_days']}D {item['expected_return_percent']:+.2f}% "
+                f"({item['probability_of_direction']:.0%} probability)"
+            )
+        return "Forward prediction: " + ", ".join(parts) + "."
+
     @classmethod
     def generate_for_event(cls, db: Session, event_id: int) -> dict:
         event = db.scalar(select(MarketEvent).where(MarketEvent.id == event_id))
@@ -88,14 +116,17 @@ class OpportunityAlertEngine:
 
             market_score = float(result["score"])
             pricing = MarketPricingEngine.analyze(db=db, event=event, stock=stock)
+            prediction = ForwardPredictionEngine.predict(db=db, event=event, stock=stock)
             pricing_factor = cls._pricing_factor(pricing)
+            prediction_factor = cls._prediction_factor(prediction, event.direction)
 
             score = round(
                 min(
                     100.0,
-                    market_score * 0.60
+                    market_score * 0.50
                     + (causal_strength * 100.0) * 0.20
-                    + (pricing_factor * 100.0) * 0.20,
+                    + (pricing_factor * 100.0) * 0.15
+                    + prediction_factor * 15.0,
                 ),
                 2,
             )
@@ -129,7 +160,8 @@ class OpportunityAlertEngine:
                 f"Causal chain: {chain_text or 'not established'}. "
                 f"Causal strength: {causal_strength:.0%}. "
                 f"Market signal: {market_score:.1f}/100. "
-                f"{pricing_text} Combined opportunity score: {score:.1f}/100."
+                f"{pricing_text} {cls._prediction_summary(prediction)} "
+                f"Combined opportunity score: {score:.1f}/100."
             ).strip()
 
             if existing:
