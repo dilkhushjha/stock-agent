@@ -2,12 +2,12 @@ from datetime import datetime
 
 from sqlalchemy import (
     Column,
+    DateTime,
+    Float,
+    ForeignKey,
     Integer,
     String,
     Text,
-    Float,
-    DateTime,
-    ForeignKey,
 )
 
 from app.data.database import Base
@@ -22,6 +22,12 @@ class MarketEvent(Base):
         Integer,
         ForeignKey("news_articles.id"),
         nullable=False,
+        index=True,
+    )
+
+    event_date = Column(
+        DateTime,
+        nullable=True,
         index=True,
     )
 
