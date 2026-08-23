@@ -16,6 +16,7 @@ from app.api.sector import router as sector_router
 from app.api.ml_predictions import router as ml_predictions_router
 from app.api.backtest import router as backtest_router
 from app.api.agent import router as agent_router
+from app.api.recommendations import router as recommendations_router
 from app.data.database_init import initialize_database
 
 
@@ -57,6 +58,7 @@ app.include_router(ml_predictions_router)
 app.include_router(alerts_router)
 app.include_router(backtest_router)
 app.include_router(agent_router)
+app.include_router(recommendations_router)
 
 
 @app.get("/")
