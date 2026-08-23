@@ -9,6 +9,7 @@ from app.intelligence.evaluator import PredictionEvaluator
 from app.intelligence.alert_engine import OpportunityAlertEngine
 from app.intelligence.market_data_provider import YahooFinanceProvider
 from app.intelligence.market_data_sync import MarketDataSyncService
+from app.ml.prediction_engine import MLPredictionEngine
 from app.models.event import MarketEvent
 
 
@@ -37,6 +38,15 @@ def start_scheduler():
     )
 
     scheduler.add_job(
+        run_ml_prediction_cycle,
+        trigger="interval",
+        minutes=15,
+        id="ml_prediction_cycle",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    scheduler.add_job(
         refresh_opportunities,
         trigger="interval",
         minutes=15,
@@ -54,10 +64,21 @@ def start_scheduler():
         max_instances=1,
     )
 
+    # Run the first quantitative prediction pass shortly after startup so the
+    # dashboard does not have to wait for the first 15-minute interval.
+    scheduler.add_job(
+        run_ml_prediction_cycle,
+        trigger="date",
+        run_date=datetime.utcnow() + timedelta(seconds=5),
+        id="ml_prediction_initial",
+        replace_existing=True,
+    )
+
     scheduler.start()
     print("[SCHEDULER] Market Agent started.")
     print("[SCHEDULER] News cycle: every 5 minutes.")
     print("[SCHEDULER] Market data sync: every 15 minutes.")
+    print("[SCHEDULER] ML predictions: every 15 minutes.")
     print("[SCHEDULER] Opportunity refresh: every 15 minutes.")
 
 
@@ -95,13 +116,31 @@ def run_market_data_sync():
         db.close()
 
 
-def refresh_opportunities():
-    """Re-score recent events against the newest market data.
+def run_ml_prediction_cycle():
+    """Run the already-trained model against the newest available data.
 
-    This is the key to spontaneous updates: we do not retrain the model for
-    every event. New prices, volume and pricing state are fed into the existing
-    opportunity engine, which can raise, lower or stale an alert.
+    Training is deliberately not part of this cycle. The saved artifact is
+    loaded once and inference is repeated for every active company. New market
+    rows therefore produce new predictions without retraining the model.
     """
+    print("[ML] Running live prediction cycle...")
+    db = SessionLocal()
+    try:
+        engine = MLPredictionEngine(db)
+        engine.load_model_artifact()
+        results = engine.predict_all()
+        successful = len(results)
+        print(f"[ML] Predictions completed: {successful}")
+        return {"successful": successful, "results": results}
+    except Exception as exc:
+        print(f"[ML] Prediction cycle failed: {exc}")
+        return {"successful": 0, "error": str(exc)}
+    finally:
+        db.close()
+
+
+def refresh_opportunities():
+    """Re-score recent events against the newest market data and predictions."""
     print("[OPPORTUNITY] Refreshing recent opportunities...")
     db = SessionLocal()
     try:
