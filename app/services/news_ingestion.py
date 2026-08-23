@@ -17,6 +17,8 @@ class NewsIngestionService:
         inserted = 0
         skipped = 0
         duplicate_urls = 0
+        seen_urls = set()
+        seen_fingerprints = set()
 
         for article in unique_articles:
             fingerprint = article.get("fingerprint")
@@ -25,6 +27,13 @@ class NewsIngestionService:
             # Fingerprints catch the same story published through different URLs;
             # URLs catch feed refreshes where the collector generated a different
             # fingerprint for an already stored article.
+            if (url and url in seen_urls) or (
+                fingerprint and fingerprint in seen_fingerprints
+            ):
+                skipped += 1
+                duplicate_urls += int(bool(url and url in seen_urls))
+                continue
+
             existing = None
             if fingerprint:
                 existing = db.scalar(
@@ -37,8 +46,7 @@ class NewsIngestionService:
 
             if existing:
                 skipped += 1
-                if url and existing.url == url:
-                    duplicate_urls += 1
+                duplicate_urls += int(bool(url and existing.url == url))
                 continue
 
             news = NewsArticle(
@@ -52,16 +60,10 @@ class NewsIngestionService:
             )
             db.add(news)
             inserted += 1
-
-            # Avoid a second INSERT for the same URL/fingerprint inside this
-            # collector batch. The DB unique constraints remain the final guard.
-            try:
-                db.flush()
-            except Exception:
-                db.rollback()
-                skipped += 1
-                inserted -= 1
-                duplicate_urls += 1
+            if url:
+                seen_urls.add(url)
+            if fingerprint:
+                seen_fingerprints.add(fingerprint)
 
         db.commit()
 
