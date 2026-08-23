@@ -9,7 +9,7 @@ from app.models.news import NewsArticle
 
 
 class OpportunityAlertEngine:
-    """Turns a detected market event into user-facing opportunities."""
+    """Turns market events into user-facing opportunities and refreshes them as evidence changes."""
 
     MIN_ALERT_SCORE = 55.0
 
@@ -31,9 +31,7 @@ class OpportunityAlertEngine:
 
     @classmethod
     def generate_for_event(cls, db: Session, event_id: int) -> dict:
-        event = db.scalar(
-            select(MarketEvent).where(MarketEvent.id == event_id)
-        )
+        event = db.scalar(select(MarketEvent).where(MarketEvent.id == event_id))
         if not event:
             raise ValueError(f"Event {event_id} not found.")
 
@@ -43,39 +41,56 @@ class OpportunityAlertEngine:
 
         mapping = ExposureMappingService.map_event(db, event_id)
         if not mapping["stocks_found"]:
-            return {"event_id": event_id, "alerts_created": 0, "alerts": []}
+            return {"event_id": event_id, "alerts_created": 0, "alerts_updated": 0, "alerts": []}
 
         signal_result = SignalEngine.generate(db=db, event_id=event_id)
-        article = db.scalar(
-            select(NewsArticle).where(NewsArticle.id == event.news_id)
-        )
+        article = db.scalar(select(NewsArticle).where(NewsArticle.id == event.news_id))
 
         alerts = []
         created_count = 0
+        updated_count = 0
         confidence = float(event.confidence or 0.0)
 
         for result in signal_result["results"]:
             score = float(result["score"])
-            if score < cls.MIN_ALERT_SCORE:
-                continue
-
             existing = db.scalar(
                 select(OpportunityAlert).where(
                     OpportunityAlert.event_id == event_id,
                     OpportunityAlert.symbol == result["symbol"],
                 )
             )
-            if existing:
-                alerts.append(existing)
+
+            if score < cls.MIN_ALERT_SCORE:
+                if existing and existing.status == "NEW":
+                    existing.status = "STALE"
+                    updated_count += 1
                 continue
 
-            action = cls._action(score, event.direction)
+            action = cls._action(score, result["direction"])
             reason = (
                 f"{event.title}. {event.description or ''} "
                 f"Event confidence: {confidence:.0%}. "
                 f"Exposure and current market behaviour produced a "
                 f"signal score of {score:.1f}/100."
-            )
+            ).strip()
+
+            if existing:
+                # A developing event may cross the alert threshold later.
+                # Refresh the existing alert instead of creating duplicates.
+                previous_action = existing.action
+                existing.action = action
+                existing.confidence = confidence
+                existing.opportunity_score = score
+                existing.expected_horizon = event.time_horizon
+                existing.risk = cls._risk(score, event)
+                existing.title = f"Potential {entity} opportunity: {result['symbol']}"
+                existing.reason = reason
+                existing.source_url = article.url if article else existing.source_url
+                existing.source_name = article.source if article else existing.source_name
+                existing.status = "NEW"
+                updated_count += 1
+                alerts.append(existing)
+                continue
 
             alert = OpportunityAlert(
                 event_id=event_id,
@@ -87,7 +102,7 @@ class OpportunityAlertEngine:
                 expected_horizon=event.time_horizon,
                 risk=cls._risk(score, event),
                 title=f"Potential {entity} opportunity: {result['symbol']}",
-                reason=reason.strip(),
+                reason=reason,
                 source_url=article.url if article else None,
                 source_name=article.source if article else None,
                 status="NEW",
@@ -102,6 +117,7 @@ class OpportunityAlertEngine:
             "event_id": event_id,
             "entity": entity,
             "alerts_created": created_count,
+            "alerts_updated": updated_count,
             "alerts": [
                 {
                     "id": a.id,
