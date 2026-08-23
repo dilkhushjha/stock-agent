@@ -14,10 +14,12 @@ from app.api.regime import router as regime_router
 from app.api.market_context import router as market_context_router
 from app.api.sector import router as sector_router
 from app.api.ml_predictions import router as ml_predictions_router
+from app.data.database_init import initialize_database
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    initialize_database()
     start_scheduler()
     yield
     stop_scheduler()
