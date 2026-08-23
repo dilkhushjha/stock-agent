@@ -1,8 +1,9 @@
 const API_BASE_URL = "http://127.0.0.1:8000";
 
-async function apiRequest(endpoint) {
+async function apiRequest(endpoint, options = {}) {
     const response = await fetch(
-        `${API_BASE_URL}${endpoint}`
+        `${API_BASE_URL}${endpoint}`,
+        options
     );
 
     if (!response.ok) {
@@ -23,5 +24,18 @@ export async function getPredictions(limit = 50) {
 export async function getMarketRegime() {
     return apiRequest(
         "/regime/"
+    );
+}
+
+export async function getOpportunityAlerts(limit = 20) {
+    return apiRequest(
+        `/alerts/latest?limit=${limit}`
+    );
+}
+
+export async function markAlertRead(id) {
+    return apiRequest(
+        `/alerts/${id}/read`,
+        { method: "PATCH" }
     );
 }
