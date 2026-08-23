@@ -1,7 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.data.market.market_data import MarketDataService
 from app.intelligence.analytics import MarketAnalyticsService
 from app.models.event import MarketEvent
 from app.models.exposure import StockExposure
@@ -24,143 +23,94 @@ class SignalEngine:
     }
 
     @staticmethod
-    def _momentum_score(
-        return_5d: float | None,
-    ) -> float:
-
+    def _momentum_score(return_5d: float | None) -> float:
         if return_5d is None:
             return 0.5
-
         if return_5d >= 5:
             return 1.0
-
         if return_5d >= 2:
             return 0.8
-
         if return_5d > 0:
             return 0.65
-
         if return_5d > -2:
             return 0.45
-
         if return_5d > -5:
             return 0.25
-
         return 0.1
 
     @staticmethod
-    def _volume_score(
-        volume_ratio: float | None,
-    ) -> float:
-
+    def _volume_score(volume_ratio: float | None) -> float:
         if volume_ratio is None:
             return 0.5
-
         if volume_ratio >= 3:
             return 1.0
-
         if volume_ratio >= 2:
             return 0.85
-
         if volume_ratio >= 1.5:
             return 0.7
-
         if volume_ratio >= 1:
             return 0.55
-
         return 0.35
 
     @staticmethod
-    def generate(
-        db: Session,
-        event_id: int,
-    ) -> dict:
-
-        event = db.scalar(
-            select(MarketEvent).where(
-                MarketEvent.id == event_id
-            )
+    def _direction_multiplier(direction: str | None) -> float:
+        return SignalEngine.DIRECTION_MULTIPLIER.get(
+            str(direction or "NEUTRAL").upper(),
+            0.0,
         )
 
+    @classmethod
+    def generate(cls, db: Session, event_id: int) -> dict:
+        event = db.scalar(
+            select(MarketEvent).where(MarketEvent.id == event_id)
+        )
         if not event:
-            raise ValueError(
-                f"Event {event_id} not found."
-            )
+            raise ValueError(f"Event {event_id} not found.")
 
         exposures = db.scalars(
             select(StockExposure).where(
                 StockExposure.entity == event.entity.upper()
             )
         ).all()
-
         if not exposures:
-            raise ValueError(
-                f"No stock exposures found for "
-                f"{event.entity}."
-            )
+            raise ValueError(f"No stock exposures found for {event.entity}.")
 
-        impact_score = SignalEngine.IMPACT_WEIGHT.get(
-            event.impact,
-            0.35,
-        )
-
-        confidence = (
-            event.confidence
-            if event.confidence is not None
-            else 0.3
-        )
-
-        direction = SignalEngine.DIRECTION_MULTIPLIER.get(
-            event.direction,
-            0.0,
-        )
-
+        impact_score = cls.IMPACT_WEIGHT.get(event.impact, 0.35)
+        confidence = event.confidence if event.confidence is not None else 0.3
+        event_direction = cls._direction_multiplier(event.direction)
         results = []
 
         for exposure in exposures:
-
             stock = db.scalar(
-                select(Stock).where(
-                    Stock.id == exposure.stock_id
-                )
+                select(Stock).where(Stock.id == exposure.stock_id)
             )
-
             if not stock:
                 continue
 
             try:
-
-                analytics = (
-                    MarketAnalyticsService.get_snapshot(
-                        db=db,
-                        symbol=stock.symbol,
-                    )
+                analytics = MarketAnalyticsService.get_snapshot(
+                    db=db,
+                    symbol=stock.symbol,
                 )
-
             except ValueError:
-
                 continue
 
-            momentum = SignalEngine._momentum_score(
+            momentum = cls._momentum_score(
                 analytics["returns"]["5d_percent"]
             )
-
-            volume = SignalEngine._volume_score(
-                analytics["volume_ratio"]
-            )
-
+            volume = cls._volume_score(analytics["volume_ratio"])
             trend_score = {
                 "BULLISH": 1.0,
                 "BEARISH": 0.2,
                 "NEUTRAL": 0.5,
-            }.get(
-                analytics["trend"],
-                0.5,
-            )
+            }.get(analytics["trend"], 0.5)
 
-            # ------------------------------------------
-            # Event score
-            # ------------------------------------------
+            # The event direction describes the commodity/industry.
+            # Exposure direction describes how that event affects this stock.
+            # Combining both prevents errors such as treating higher interest
+            # rates as bullish for banks whose exposure is explicitly negative.
+            exposure_direction = cls._direction_multiplier(exposure.direction)
+            effective_direction = event_direction * exposure_direction
 
             event_score = (
                 impact_score
@@ -168,93 +118,69 @@ class SignalEngine:
                 * exposure.exposure_strength
             )
 
-            # ------------------------------------------
-            # Market confirmation
-            # ------------------------------------------
-
             market_confirmation = (
                 momentum * 0.45
                 + volume * 0.25
                 + trend_score * 0.30
             )
 
-            # ------------------------------------------
-            # Direction alignment
-            # ------------------------------------------
-
-            if direction > 0:
-
+            if effective_direction > 0:
                 alignment = market_confirmation
-
-            elif direction < 0:
-
+            elif effective_direction < 0:
                 alignment = 1 - market_confirmation
-
             else:
-
                 alignment = 0.5
 
-            raw_score = (
-                event_score
-                * alignment
-                * 100
-            )
-
             score = round(
-                max(0, min(100, raw_score)),
+                max(0, min(100, event_score * alignment * 100)),
                 2,
             )
 
             if score >= 75:
                 signal = "HIGH_ATTENTION"
-
             elif score >= 55:
                 signal = "WATCH"
-
             elif score >= 35:
                 signal = "NEUTRAL"
-
             else:
                 signal = "LOW_PRIORITY"
 
-            explanation = (
-                f"Event={event.event_type}, "
-                f"direction={event.direction}, "
-                f"impact={event.impact}, "
-                f"confidence={confidence:.2f}; "
-                f"exposure={exposure.exposure_strength:.2f}; "
-                f"5D return="
-                f"{analytics['returns']['5d_percent']}; "
-                f"trend={analytics['trend']}; "
-                f"volume ratio="
-                f"{analytics['volume_ratio']}"
+            stock_direction = (
+                "POSITIVE" if effective_direction > 0
+                else "NEGATIVE" if effective_direction < 0
+                else "NEUTRAL"
             )
 
-            signal_record = MarketSignal(
+            explanation = (
+                f"Event={event.event_type}; "
+                f"event direction={event.direction}; "
+                f"stock exposure={exposure.direction}; "
+                f"stock impact={stock_direction}; "
+                f"impact={event.impact}; confidence={confidence:.2f}; "
+                f"exposure={exposure.exposure_strength:.2f}; "
+                f"5D return={analytics['returns']['5d_percent']}; "
+                f"trend={analytics['trend']}; "
+                f"volume ratio={analytics['volume_ratio']}"
+            )
+
+            db.add(MarketSignal(
                 event_id=event.id,
                 stock_id=stock.id,
                 score=score,
                 signal=signal,
                 explanation=explanation,
-            )
+            ))
 
-            db.add(signal_record)
-
-            results.append(
-                {
-                    "symbol": stock.symbol,
-                    "score": score,
-                    "signal": signal,
-                    "explanation": explanation,
-                }
-            )
+            results.append({
+                "symbol": stock.symbol,
+                "score": score,
+                "signal": signal,
+                "direction": stock_direction,
+                "explanation": explanation,
+            })
 
         db.commit()
-
-        results.sort(
-            key=lambda item: item["score"],
-            reverse=True,
-        )
+        results.sort(key=lambda item: item["score"], reverse=True)
 
         return {
             "event_id": event.id,
