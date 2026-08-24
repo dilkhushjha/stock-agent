@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import "./Dashboard.css";
 import "./CompactRecommendations.css";
+import "./ModernDashboard.css";
 import SectorCards from "./SectorCards";
 import { getIntelligenceOverview, getRecommendations, getLiveAlerts, markAlertRead, runLiveAgent, getAgentStatus } from "./services/api";
 
