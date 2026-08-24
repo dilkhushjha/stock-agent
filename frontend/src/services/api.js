@@ -25,3 +25,7 @@ export async function markAlertRead(id) {
 export async function runLiveAgent() {
     return apiRequest("/agent/run-now", { method: "POST" });
 }
+
+export async function getAgentStatus() {
+    return apiRequest("/agent/status");
+}
