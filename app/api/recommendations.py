@@ -8,6 +8,7 @@ from app.data.database import get_db
 from app.intelligence.causal_intelligence import CausalIntelligence
 from app.intelligence.exposure import ExposureMappingService
 from app.intelligence.historical_analogues import find_historical_analogues
+from app.intelligence.prediction_learning import PredictionLearning
 from app.intelligence.universe_recommendation_engine import UniverseRecommendationEngine
 from app.models.event import MarketEvent
 from app.models.stock import Stock
@@ -67,6 +68,25 @@ def get_recommendations(
                 "positive_5d_rate_pct": None,
                 "median_10d_return_pct": None,
             }
+
+        # Prediction feedback becomes part of future opportunity ranking.
+        # A stock with repeatedly successful forecasts receives a modest boost;
+        # a stock with poor realised forecasts is penalised. No feedback means
+        # no artificial penalty.
+        learning = PredictionLearning.stock_reliability(db, stock.id if stock else -1, "5d")
+        item["prediction_learning"] = learning
+        if learning["samples"] >= 3:
+            bias = float(learning["feedback_bias"] or 0)
+            item["score"] = round(max(0.0, min(100.0, float(item.get("score") or 0) + bias)), 1)
+            base_confidence = float(item.get("confidence") or 0)
+            confidence_adjustment = bias / 100.0 * 0.12
+            item["confidence"] = round(max(0.0, min(0.99, base_confidence + confidence_adjustment)), 3)
+            item["learning_note"] = (
+                f"{learning['target_hit_rate_pct']:.0f}% 5D target-hit rate across "
+                f"{learning['samples']} evaluated predictions."
+            )
+        else:
+            item["learning_note"] = "Insufficient evaluated history for stock-specific learning."
 
     priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
     recommendations.sort(
