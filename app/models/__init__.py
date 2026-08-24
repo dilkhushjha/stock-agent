@@ -11,19 +11,11 @@ from app.models.company_exposure import CompanyExposure
 from app.models.prediction import SignalPrediction
 from app.models.ml_prediction import MLPrediction
 from app.models.alert import OpportunityAlert
+from app.models.prediction_feedback import PredictionFeedback
 
 __all__ = [
-    "Stock",
-    "MarketData",
-    "NewsArticle",
-    "MarketEvent",
-    "StockExposure",
-    "MarketSignal",
-    "EventOutcome",
-    "CompanyFundamentals",
-    "MarketRelationship",
-    "CompanyExposure",
-    "SignalPrediction",
-    "MLPrediction",
-    "OpportunityAlert",
+    "Stock", "MarketData", "NewsArticle", "MarketEvent", "StockExposure",
+    "MarketSignal", "EventOutcome", "CompanyFundamentals", "MarketRelationship",
+    "CompanyExposure", "SignalPrediction", "MLPrediction", "OpportunityAlert",
+    "PredictionFeedback",
 ]
