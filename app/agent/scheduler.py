@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import func, select
@@ -15,10 +16,29 @@ from app.models.event import MarketEvent
 from app.models.stock import Stock
 
 
+IST = ZoneInfo("Asia/Kolkata")
+MARKET_OPEN = time(9, 15)
+MARKET_CLOSE = time(15, 30)
+
 agent = MarketAgent()
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone=IST)
 market_data_provider = YahooFinanceProvider()
 universe_cursor = 0
+last_cycle = None
+last_cycle_result = None
+
+
+def market_status():
+    now = datetime.now(IST)
+    weekday = now.weekday() < 5
+    in_session = weekday and MARKET_OPEN <= now.time().replace(tzinfo=None) <= MARKET_CLOSE
+    return {
+        "timestamp": now.isoformat(),
+        "timezone": "Asia/Kolkata",
+        "is_weekday": weekday,
+        "market_open": in_session,
+        "session": "OPEN" if in_session else ("PRE_MARKET" if weekday and now.time().replace(tzinfo=None) < MARKET_OPEN else "CLOSED"),
+    }
 
 
 def _next_universe_batch():
@@ -38,16 +58,34 @@ def _next_universe_batch():
 
 
 def start_scheduler():
+    # News is a 24x7 input: events can happen outside market hours.
     scheduler.add_job(agent.run_news_cycle, trigger="interval", minutes=5, id="news_cycle", replace_existing=True, max_instances=1, coalesce=True)
+
+    # Market-dependent intelligence runs only during the trading session.
     scheduler.add_job(run_live_cycle, trigger="interval", minutes=15, id="live_intelligence_cycle", replace_existing=True, max_instances=1, coalesce=True)
+
+    # Re-check predictions frequently enough to capture forward outcomes.
     scheduler.add_job(run_evaluation, trigger="interval", minutes=30, id="prediction_evaluation", replace_existing=True, max_instances=1, coalesce=True)
+
+    # Recurrent learning is intentionally slower and never blocks live cycles.
     scheduler.add_job(retrain_model_cycle, trigger="interval", days=7, id="model_retraining", replace_existing=True, max_instances=1, coalesce=True)
-    scheduler.add_job(agent.run_news_cycle, trigger="date", run_date=datetime.utcnow() + timedelta(seconds=5), id="news_initial", replace_existing=True)
-    scheduler.add_job(run_live_cycle, trigger="date", run_date=datetime.utcnow() + timedelta(seconds=15), id="live_initial", replace_existing=True)
+
+    # Prime the intelligence engine immediately after startup.
+    scheduler.add_job(agent.run_news_cycle, trigger="date", run_date=datetime.now(IST) + timedelta(seconds=5), id="news_initial", replace_existing=True)
+    scheduler.add_job(run_live_cycle, trigger="date", run_date=datetime.now(IST) + timedelta(seconds=15), id="live_initial", replace_existing=True)
+
+    # Pre-market synthesis: collect overnight/news from the previous session before 09:15.
+    scheduler.add_job(agent.run_news_cycle, trigger="cron", day_of_week="mon-fri", hour=8, minute=45, id="premarket_news", replace_existing=True, max_instances=1, coalesce=True)
+
+    # Post-market capture: preserve the day's final state for next-day historical reasoning.
+    scheduler.add_job(run_post_market_cycle, trigger="cron", day_of_week="mon-fri", hour=15, minute=40, id="post_market_cycle", replace_existing=True, max_instances=1, coalesce=True)
+
     scheduler.start()
-    print("[SCHEDULER] Market Agent started.")
-    print("[SCHEDULER] News ingestion + event analysis: every 5 minutes.")
-    print(f"[SCHEDULER] Broad NSE market/ML scan: {DEFAULT_BATCH_SIZE} stocks per 15-minute cycle, rotating continuously.")
+    print("[SCHEDULER] Market Agent started in Asia/Kolkata.")
+    print("[SCHEDULER] News ingestion/event intelligence: every 5 minutes, 24x7.")
+    print(f"[SCHEDULER] Live market/ML scan: {DEFAULT_BATCH_SIZE} NSE stocks per 15-minute trading-session cycle.")
+    print("[SCHEDULER] Pre-market synthesis: 08:45 IST weekdays.")
+    print("[SCHEDULER] Post-market capture: 15:40 IST weekdays.")
     print("[SCHEDULER] Prediction evaluation: every 30 minutes.")
     print("[SCHEDULER] Model retraining: every 7 days.")
 
@@ -134,20 +172,42 @@ def refresh_opportunities():
         db.close()
 
 
-def run_live_cycle():
+def run_live_cycle(force: bool = False):
+    global last_cycle, last_cycle_result
+    status = market_status()
+    if not force and not status["market_open"]:
+        print(f"[LIVE CYCLE] Skipped: market session is {status['session']}.")
+        return {"status": "skipped", "reason": status["session"], "market": status}
+
     print("\n[LIVE CYCLE] Starting rotating full-universe intelligence cycle...")
-    started = datetime.utcnow()
+    started = datetime.now(IST)
     offset, total = _next_universe_batch()
     batch_size = min(DEFAULT_BATCH_SIZE, total) if total else DEFAULT_BATCH_SIZE
     market = run_market_data_sync(offset, batch_size)
     predictions = run_ml_prediction_cycle(offset, batch_size)
     opportunities = refresh_opportunities()
-    elapsed = (datetime.utcnow() - started).total_seconds()
-    print(f"[LIVE CYCLE] Complete: batch={offset}:{offset + batch_size}/{total}, market_success={market.get('successful_stocks', 0)}, predictions={predictions.get('successful', 0)}, events={opportunities.get('events', 0)}, elapsed={elapsed:.1f}s")
-    return {
+    elapsed = (datetime.now(IST) - started).total_seconds()
+    result = {
+        "status": "completed",
+        "market": market_status(),
         "universe": {"offset": offset, "batch_size": batch_size, "total": total},
-        "market": market,
-        "predictions": {"successful": predictions.get("successful", 0), "error": predictions.get("error")},
+        "market_data": market,
+        "predictions": {"successful": predictions.get("successful", 0), "failed": predictions.get("failed", 0), "error": predictions.get("error")},
         "opportunities": opportunities,
         "elapsed_seconds": elapsed,
     }
+    last_cycle = datetime.now(IST)
+    last_cycle_result = result
+    print(f"[LIVE CYCLE] Complete: batch={offset}:{offset + batch_size}/{total}, market_success={market.get('successful_stocks', 0)}, predictions={predictions.get('successful', 0)}, events={opportunities.get('events', 0)}, elapsed={elapsed:.1f}s")
+    return result
+
+
+def run_post_market_cycle():
+    print("[POST-MARKET] Capturing final session intelligence...")
+    try:
+        result = agent.run_news_cycle()
+        result["live"] = run_live_cycle(force=True)
+        return result
+    except Exception as exc:
+        print(f"[POST-MARKET] Failed: {exc}")
+        return {"status": "failed", "error": str(exc)}
