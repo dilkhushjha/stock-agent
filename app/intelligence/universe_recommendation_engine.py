@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
+from app.intelligence.opportunity_engine import OpportunityEngine
 from app.intelligence.recommendation_engine import RecommendationEngine
 from app.models.event import MarketEvent
 from app.models.market_data import MarketData
@@ -11,7 +12,7 @@ from app.models.stock import Stock
 
 
 class UniverseRecommendationEngine:
-    """Rank the broad NSE universe by sector activity, then stock evidence."""
+    """Rank the broad NSE universe using context-aware opportunity intelligence."""
 
     UNIVERSE_LIMIT = 2500
     PRIORITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
@@ -47,13 +48,34 @@ class UniverseRecommendationEngine:
                 )
                 if not item:
                     continue
+
+                # Preserve the event's real classification so the opportunity
+                # engine can choose context-specific evidence weights.
+                event_id = (item.get("evidence") or {}).get("event_id")
+                event = next((e for e in events if e.id == event_id), None)
+                if event:
+                    item.setdefault("event", {})["event_type"] = event.event_type
+                    item["event"]["confidence"] = event.confidence
+
                 sector = str(item.get("sector") or stock.sector or "OTHER").strip().upper()
                 ss = sector_stats.get(sector, cls._empty_sector())
-                stock_score = float(item.get("score") or 0)
+
+                # First calculate the stock-level opportunity using context-aware
+                # weights rather than a fixed 40/20/18/12/10 formula.
+                opportunity = OpportunityEngine.score(item)
+                stock_score = float(opportunity["score"])
                 sector_score = ss["score"]
-                item["pre_sector_score"] = stock_score
+
+                # Sector impact matters more when there is a strong event. Keep
+                # the blend bounded so a noisy sector cannot overwhelm company evidence.
+                sector_weight = 0.25 if ss["high_impact"] > 0 else (0.20 if ss["count"] >= 3 else 0.14)
+                final_score = stock_score * (1.0 - sector_weight) + sector_score * sector_weight
+
+                item["pre_sector_score"] = round(stock_score, 1)
                 item["sector_score"] = sector_score
-                item["score"] = round(min(100, stock_score * 0.82 + sector_score * 0.18), 1)
+                item["sector_weight"] = round(sector_weight, 2)
+                item["score"] = round(min(100, final_score), 1)
+                item["opportunity_intelligence"] = opportunity
                 item["sector_signal_count"] = ss["count"]
                 item["sector_high_impact_count"] = ss["high_impact"]
                 item["sector_latest_event"] = ss["latest_title"]
@@ -61,6 +83,7 @@ class UniverseRecommendationEngine:
                 item["universe_scanned"] = len(stocks)
                 item["prediction_coverage"] = "TRAINED_MODEL" if item.get("predicted_5d") is not None else "NO_STOCK_MODEL"
                 item["evidence_reasons"] = cls._reasons(item, ss)
+                item["priority"] = cls._priority(item)
                 candidates.append(item)
             except Exception:
                 continue
@@ -77,9 +100,6 @@ class UniverseRecommendationEngine:
             -float(x.get("score") or 0),
         ))
 
-        # Keep the strongest sectors dominant, but prevent one sector from
-        # monopolising the shortlist. This makes the shortlist responsive to
-        # multiple simultaneous sector opportunities without manufacturing BUYs.
         selected = []
         sector_counts = {}
         for item in candidates:
@@ -91,8 +111,6 @@ class UniverseRecommendationEngine:
             if len(selected) >= limit:
                 break
 
-        # If there are not enough candidates after diversification, fill the
-        # remaining slots with the next strongest candidates.
         if len(selected) < limit:
             selected_symbols = {x.get("symbol") for x in selected}
             for item in candidates:
@@ -119,11 +137,24 @@ class UniverseRecommendationEngine:
                 grouped.setdefault(str(event.sector).strip().upper(), []).append(event)
         result = {}
         for sector, rows in grouped.items():
-            high = sum(str(e.impact or "").upper() in {"HIGH", "SEVERE"} for e in rows)
+            high = sum(str(e.impact or "").upper() in {"HIGH", "SEVERE", "CRITICAL"} for e in rows)
             positive = sum(str(e.direction or "").upper() in {"POSITIVE", "BULLISH"} for e in rows)
             negative = sum(str(e.direction or "").upper() in {"NEGATIVE", "BEARISH"} for e in rows)
-            score = min(100, 35 + min(15, len(rows) * 2) + min(30, high * 10 + max(0, len(rows) - high) * 3) + min(20, positive * 5) - min(12, negative * 4))
-            result[sector] = {"score": round(score, 1), "count": len(rows), "high_impact": high, "positive": positive, "latest_title": rows[0].title}
+            confidence_values = [float(e.confidence) for e in rows if e.confidence is not None]
+            confidence = (sum(confidence_values) / len(confidence_values)) if confidence_values else 0.5
+            recency = max(0, 14 - ((datetime.utcnow() - (rows[0].event_date or datetime.utcnow())).total_seconds() / 86400)) / 14
+            score = 30 + min(14, len(rows) * 2) + min(30, high * 10 + max(0, len(rows) - high) * 3)
+            score += min(14, positive * 4) - min(14, negative * 5)
+            score += confidence * 10 + recency * 8
+            result[sector] = {
+                "score": round(max(0, min(100, score)), 1),
+                "count": len(rows),
+                "high_impact": high,
+                "positive": positive,
+                "negative": negative,
+                "confidence": round(confidence, 3),
+                "latest_title": rows[0].title,
+            }
         return result
 
     @staticmethod
@@ -131,15 +162,41 @@ class UniverseRecommendationEngine:
         return "HIGH" if score >= 75 else "MEDIUM" if score >= 55 else "LOW"
 
     @staticmethod
+    def _priority(item):
+        score = float(item.get("score") or 0)
+        intelligence = float(item.get("intelligence_score") or 0)
+        fundamental = float(item.get("fundamental_score") or 0)
+        opportunity = item.get("opportunity_intelligence") or {}
+        probability = float(opportunity.get("estimated_target_probability_20d_pct") or 0)
+        risk_reward = float(opportunity.get("risk_reward") or 0)
+
+        if score >= 82 and intelligence >= 65 and fundamental >= 55 and probability >= 65 and risk_reward >= 1.8:
+            return "HIGH"
+        if score >= 62 and (intelligence >= 50 or probability >= 55) and risk_reward >= 1.2:
+            return "MEDIUM"
+        return "LOW"
+
+    @staticmethod
     def _reasons(item, ss):
         reasons = []
         news, event, market = item.get("news") or {}, item.get("event") or {}, item.get("market") or {}
-        if news.get("title"): reasons.append(f"Catalyst: {news['title']}")
-        if event.get("description"): reasons.append(f"Cause → effect: {event['description']}")
-        elif event.get("sector"): reasons.append(f"Affected sector: {event['sector']}")
-        if ss.get("count"): reasons.append(f"Sector activity: {ss['count']} signals; {ss['high_impact']} high-impact")
-        if market.get("return_5d_pct") is not None: reasons.append(f"5D return: {float(market['return_5d_pct']):+.2f}%")
-        if market.get("volume_vs_20d_avg") is not None: reasons.append(f"Volume: {float(market['volume_vs_20d_avg']):.2f}x 20D avg")
-        if item.get("fundamental_score") is not None: reasons.append(f"Fundamentals: {float(item['fundamental_score']):.0f}/100")
-        if item.get("predicted_5d") is not None: reasons.append(f"ML 5D: {float(item['predicted_5d']):+.2f}%")
+        opportunity = item.get("opportunity_intelligence") or {}
+        if news.get("title"):
+            reasons.append(f"Catalyst: {news['title']}")
+        if event.get("description"):
+            reasons.append(f"Cause → effect: {event['description']}")
+        elif event.get("sector"):
+            reasons.append(f"Affected sector: {event['sector']}")
+        if ss.get("count"):
+            reasons.append(f"Sector activity: {ss['count']} signals; {ss['high_impact']} high-impact")
+        if market.get("return_5d_pct") is not None:
+            reasons.append(f"5D return: {float(market['return_5d_pct']):+.2f}%")
+        if market.get("volume_vs_20d_avg") is not None:
+            reasons.append(f"Volume: {float(market['volume_vs_20d_avg']):.2f}x 20D avg")
+        if item.get("fundamental_score") is not None:
+            reasons.append(f"Fundamentals: {float(item['fundamental_score']):.0f}/100")
+        if item.get("predicted_5d") is not None:
+            reasons.append(f"ML 5D: {float(item['predicted_5d']):+.2f}%")
+        if opportunity.get("risk_reward") is not None:
+            reasons.append(f"Estimated risk/reward: {float(opportunity['risk_reward']):.1f}x")
         return reasons[:8]
