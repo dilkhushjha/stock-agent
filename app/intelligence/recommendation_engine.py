@@ -5,6 +5,7 @@ from math import sqrt
 
 from sqlalchemy import func, select
 
+from app.intelligence.fundamental_intelligence import FundamentalIntelligence
 from app.models.alert import OpportunityAlert
 from app.models.event import MarketEvent
 from app.models.fundamentals import CompanyFundamentals
@@ -40,7 +41,6 @@ class RecommendationEngine:
             if len(recommendations) >= limit:
                 return RecommendationEngine._rank(recommendations)[:limit]
 
-        # MarketEvent uses event_date in the current schema (not event_time).
         recent_events = db.scalars(
             select(MarketEvent)
             .where(MarketEvent.event_date >= cutoff)
@@ -116,7 +116,8 @@ class RecommendationEngine:
 
         expected_5d = prediction.predicted_return_5d if prediction else None
         expected_20d = prediction.predicted_return_20d if prediction else None
-        fundamental_score = RecommendationEngine._fundamental_score(fundamentals)
+        fundamental_assessment = FundamentalIntelligence.assess(fundamentals)
+        fundamental_score = fundamental_assessment.score
         intelligence_score = float(alert.opportunity_score) if alert else RecommendationEngine._sector_intelligence_score(event, news, recent_sectors, stock)
         model_score = RecommendationEngine._model_score(prediction)
         market_score = RecommendationEngine._market_score(market)
@@ -126,6 +127,9 @@ class RecommendationEngine:
         risk = (alert.risk if alert else RecommendationEngine._risk(market, fundamentals)) or "MEDIUM"
         entry_low, entry_high = RecommendationEngine._entry_zone(current_price, market, risk)
         action = "BUY" if alert and alert.action == "BUY" and composite >= 65 else "WATCH"
+
+        fundamental_payload = RecommendationEngine._fundamentals(fundamentals)
+        fundamental_payload["intelligence"] = fundamental_assessment.as_dict()
 
         return {
             "rank": 0, "symbol": stock.symbol, "company": stock.company_name or stock.symbol,
@@ -140,9 +144,17 @@ class RecommendationEngine:
             "thesis": alert.title if alert else (event.title if event else f"{stock.company_name or stock.symbol}: multi-factor setup"),
             "why_now": RecommendationEngine._why_now(alert, prediction, market, event),
             "invalidation": RecommendationEngine._invalidation(alert, prediction, market),
-            "fundamentals": RecommendationEngine._fundamentals(fundamentals), "market": market,
+            "fundamentals": fundamental_payload, "market": market,
             "fundamental_score": round(fundamental_score, 1), "model_score": round(model_score, 1),
             "market_score": round(market_score, 1), "evidence_score": round(evidence_score, 1),
+            "fundamental_quality_score": round(fundamental_assessment.quality_score, 1),
+            "fundamental_growth_score": round(fundamental_assessment.growth_score, 1),
+            "fundamental_profitability_score": round(fundamental_assessment.profitability_score, 1),
+            "fundamental_balance_sheet_score": round(fundamental_assessment.balance_sheet_score, 1),
+            "fundamental_valuation_score": round(fundamental_assessment.valuation_score, 1),
+            "fundamental_data_completeness": round(fundamental_assessment.completeness, 2),
+            "fundamental_classification": fundamental_assessment.classification,
+            "fundamental_flags": fundamental_assessment.flags,
             "evidence": {"source": (alert.source_name if alert else None) or (news.source if news else None),
                          "source_url": (alert.source_url if alert else None) or (news.url if news else None),
                          "event_id": event.id if event else (alert.event_id if alert else None),
@@ -246,52 +258,49 @@ class RecommendationEngine:
 
     @staticmethod
     def _fundamental_score(f):
-        if not f:return 50.0
-        p=50.0
-        if f.revenue_growth is not None:p+=10 if f.revenue_growth>.05 else (-8 if f.revenue_growth<0 else 0)
-        if f.earnings_growth is not None:p+=12 if f.earnings_growth>.05 else (-10 if f.earnings_growth<0 else 0)
-        if f.roe is not None:p+=10 if f.roe>.12 else (-5 if f.roe<.05 else 0)
-        if f.debt_to_equity is not None:p+=8 if f.debt_to_equity<.8 else (-8 if f.debt_to_equity>2 else 0)
-        if f.profit_margin is not None:p+=8 if f.profit_margin>.08 else (-6 if f.profit_margin<0 else 0)
-        if f.pe_ratio is not None:p+=5 if 0<f.pe_ratio<30 else (-5 if f.pe_ratio>60 else 0)
-        return max(0,min(100,p))
+        return FundamentalIntelligence.assess(f).score
 
     @staticmethod
     def _model_score(p):
-        if not p:return 50.0
-        s=50.0
-        if p.predicted_return_5d is not None:s+=max(-25,min(25,float(p.predicted_return_5d)*5))
-        if p.predicted_return_20d is not None:s+=max(-15,min(15,float(p.predicted_return_20d)*3))
-        if str(p.signal).upper()=="BUY":s+=10
-        elif str(p.signal).upper() in {"SELL","AVOID"}:s-=15
-        return max(0,min(100,s))
+        if not p:
+            return 45.0
+        score = 50.0
+        if p.predicted_return_5d is not None:
+            score += max(-20, min(20, float(p.predicted_return_5d) * 3))
+        if p.predicted_return_20d is not None:
+            score += max(-15, min(15, float(p.predicted_return_20d) * 2))
+        if str(p.signal or "").upper() in {"BUY", "BULLISH", "LONG"}:
+            score += 8
+        elif str(p.signal or "").upper() in {"SELL", "BEARISH", "SHORT"}:
+            score -= 8
+        return max(0, min(100, score))
 
     @staticmethod
     def _fundamentals(f):
-        if not f:return {}
-        return {"market_cap":f.market_cap,"revenue":f.revenue,"net_income":f.net_income,"eps":f.eps,"pe":f.pe_ratio,"pb":f.pb_ratio,"roe":f.roe,"roa":f.roa,"profit_margin":f.profit_margin,"operating_margin":f.operating_margin,"debt_to_equity":f.debt_to_equity,"revenue_growth":f.revenue_growth,"earnings_growth":f.earnings_growth,"updated_at":f.updated_at.isoformat() if f.updated_at else None}
+        if not f: return {}
+        return {"pe":f.pe_ratio,"pb":f.pb_ratio,"roe":f.roe,"debt_to_equity":f.debt_to_equity,"profit_margin":f.profit_margin,
+                "revenue_growth":f.revenue_growth,"earnings_growth":f.earnings_growth,"market_cap":f.market_cap,
+                "revenue":f.revenue,"net_income":f.net_income,"eps":f.eps,"roa":f.roa,"operating_margin":f.operating_margin,
+                "sector":f.sector,"industry":f.industry}
 
     @staticmethod
-    def _fallback_reason(event,f,p,m):
+    def _fallback_reason(event, fundamentals, prediction, market):
+        if event: return f"{event.title}: {event.direction or 'market'} impact in {event.sector or 'affected sector'}"
+        if fundamentals: return f"Fundamental score {FundamentalIntelligence.assess(fundamentals).score:.0f}/100 with available company financial data"
+        if prediction: return "Model and market signals are being monitored"
+        return "Market setup is being monitored"
+
+    @staticmethod
+    def _why_now(alert, prediction, market, event):
+        if alert and alert.reason: return alert.reason
         parts=[]
-        if event: parts.append(f"Recent {event.sector or 'market'} event: {event.title}.")
-        if f and f.earnings_growth is not None: parts.append(f"Earnings growth is {f.earnings_growth:+.1%}.")
-        if p and p.predicted_return_20d is not None: parts.append(f"Latest model estimates {p.predicted_return_20d:+.2f}% over 20 sessions.")
-        if m.get("return_20d_pct") is not None: parts.append(f"20-session price change is {m['return_20d_pct']:+.2f}%.")
-        return " ".join(parts) or "A multi-factor screen identified this stock as worth monitoring; evidence is not yet strong enough for a higher-priority call."
+        if event and event.title: parts.append(event.title)
+        if prediction and prediction.predicted_return_5d is not None: parts.append(f"ML 5D estimate {float(prediction.predicted_return_5d):+.2f}%")
+        if market.get("return_5d_pct") is not None: parts.append(f"5D price move {float(market['return_5d_pct']):+.2f}%")
+        return " · ".join(parts) if parts else "Fresh evidence is being evaluated"
 
     @staticmethod
-    def _why_now(alert,prediction,market,event=None):
-        parts=[]
-        if alert: parts.append(f"Opportunity score {alert.opportunity_score:.0f}/100.")
-        elif event: parts.append(f"Recent event detected in {event.sector or 'the market'}.")
-        if prediction and prediction.predicted_return_5d is not None:parts.append(f"Model sees {prediction.predicted_return_5d:+.2f}% expected 5D return.")
-        if market.get("return_5d_pct") is not None:parts.append(f"Stock moved {market['return_5d_pct']:+.2f}% over 5 sessions.")
-        if market.get("volume_vs_20d_avg") is not None:parts.append(f"Volume is {market['volume_vs_20d_avg']:.1f}x the 20-session average.")
-        return " ".join(parts) or "Current evidence warrants monitoring."
-
-    @staticmethod
-    def _invalidation(alert,prediction,market):
-        if prediction and prediction.predicted_return_5d is not None and prediction.predicted_return_5d<0:return "Quantitative signal is weak; keep this on WATCH until the model improves."
-        if market.get("distance_from_52w_high_pct") is not None and market["distance_from_52w_high_pct"]>-2:return "Avoid chasing if price remains within roughly 2% of its 52-week high."
-        return "Thesis weakens if the catalyst reverses, price reaction becomes excessive, fundamentals deteriorate, or new evidence contradicts the setup."
+    def _invalidation(alert, prediction, market):
+        if alert and alert.reason: return "Reassess if the catalyst weakens, price invalidates the setup, or new evidence changes the thesis."
+        if market.get("low_52w") is not None: return f"Reassess on sustained deterioration toward the 52-week low ({market['low_52w']})."
+        return "Reassess if the catalyst weakens or market/fundamental evidence changes materially."
