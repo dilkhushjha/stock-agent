@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 
 from app.agent.orchestrator import MarketAgent
 from app.data.database import SessionLocal
+from app.data.fundamentals.fundamentals_ingestion import FundamentalsIngestionService
 from app.intelligence.broad_universe_cycle import DEFAULT_BATCH_SIZE, predict_stock_batch
 from app.intelligence.evaluator import PredictionEvaluator
 from app.intelligence.alert_engine import OpportunityAlertEngine
@@ -70,9 +71,15 @@ def start_scheduler():
     # Recurrent learning is intentionally slower and never blocks live cycles.
     scheduler.add_job(retrain_model_cycle, trigger="interval", days=7, id="model_retraining", replace_existing=True, max_instances=1, coalesce=True)
 
+    # Fundamentals (P/E, cash flow, debt, earnings quality, etc.) change on a reporting
+    # cadence, not intraday. Refresh once a day, off-market-hours, so recommendations
+    # are never scoring stocks against stale or missing fundamentals.
+    scheduler.add_job(run_fundamentals_cycle, trigger="cron", hour=6, minute=30, id="fundamentals_cycle", replace_existing=True, max_instances=1, coalesce=True)
+
     # Prime the intelligence engine immediately after startup.
     scheduler.add_job(agent.run_news_cycle, trigger="date", run_date=datetime.now(IST) + timedelta(seconds=5), id="news_initial", replace_existing=True)
     scheduler.add_job(run_live_cycle, trigger="date", run_date=datetime.now(IST) + timedelta(seconds=15), id="live_initial", replace_existing=True)
+    scheduler.add_job(run_fundamentals_cycle, trigger="date", run_date=datetime.now(IST) + timedelta(seconds=25), id="fundamentals_initial", replace_existing=True)
 
     # Pre-market synthesis: collect overnight/news from the previous session before 09:15.
     scheduler.add_job(agent.run_news_cycle, trigger="cron", day_of_week="mon-fri", hour=8, minute=45, id="premarket_news", replace_existing=True, max_instances=1, coalesce=True)
@@ -88,6 +95,7 @@ def start_scheduler():
     print("[SCHEDULER] Post-market capture: 15:40 IST weekdays.")
     print("[SCHEDULER] Prediction evaluation: every 30 minutes.")
     print("[SCHEDULER] Model retraining: every 7 days.")
+    print("[SCHEDULER] Fundamentals ingestion: daily at 06:30 IST + on startup.")
 
 
 def stop_scheduler():
@@ -103,6 +111,20 @@ def run_evaluation():
         print(f"[EVALUATOR] Evaluated: {result['evaluated']}")
     except Exception as exc:
         print(f"[EVALUATOR] Failed: {exc}")
+    finally:
+        db.close()
+
+
+def run_fundamentals_cycle():
+    print("[FUNDAMENTALS] Refreshing company fundamentals (valuation, cash flow, debt, quality)...")
+    db = SessionLocal()
+    try:
+        result = FundamentalsIngestionService.ingest_all(db)
+        print(f"[FUNDAMENTALS] Complete: success={result['success']} failed={result['failed']} of total={result['total']}")
+        return result
+    except Exception as exc:
+        print(f"[FUNDAMENTALS] Cycle failed: {exc}")
+        return {"success": 0, "failed": 0, "total": 0, "error": str(exc)}
     finally:
         db.close()
 

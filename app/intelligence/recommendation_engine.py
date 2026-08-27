@@ -6,6 +6,7 @@ from math import sqrt
 from sqlalchemy import func, select
 
 from app.intelligence.fundamental_intelligence import FundamentalIntelligence
+from app.intelligence.global_intelligence import aggregate_global_impact, detect_global_signals, sector_tags_for
 from app.models.alert import OpportunityAlert
 from app.models.event import MarketEvent
 from app.models.fundamentals import CompanyFundamentals
@@ -24,10 +25,14 @@ class RecommendationEngine:
         seen = set()
         now = datetime.utcnow()
         cutoff = now - timedelta(days=14)
+        # Detect global macro signals (Fed, crude, China, geopolitics, etc.) once per
+        # build so every stock is scored against the same read of world conditions,
+        # instead of re-scanning news per stock.
+        global_impacts = RecommendationEngine._global_sector_impacts(db, cutoff)
         alerts = db.scalars(select(OpportunityAlert).where(OpportunityAlert.action.in_(["BUY", "WATCH"])).order_by(OpportunityAlert.opportunity_score.desc(), OpportunityAlert.created_at.desc()).limit(100)).all()
         for alert in alerts:
             if alert.symbol in seen: continue
-            item = RecommendationEngine._from_stock(db, alert.symbol, alert=alert, cutoff=cutoff)
+            item = RecommendationEngine._from_stock(db, alert.symbol, alert=alert, cutoff=cutoff, global_impacts=global_impacts)
             if item:
                 recommendations.append(item); seen.add(alert.symbol)
             if len(recommendations) >= limit: return RecommendationEngine._rank(recommendations)[:limit]
@@ -37,20 +42,35 @@ class RecommendationEngine:
         fallback = []
         for stock in stocks:
             if stock.symbol in seen: continue
-            item = RecommendationEngine._from_stock(db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff)
+            item = RecommendationEngine._from_stock(db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff, global_impacts=global_impacts)
             if item and item["score"] >= 30: fallback.append(item)
         fallback.sort(key=lambda x: (-x["score"], x["symbol"]))
         recommendations.extend(fallback[: max(0, limit - len(recommendations))])
         if not recommendations and stocks:
             best = None
             for stock in stocks:
-                item = RecommendationEngine._from_stock(db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff)
+                item = RecommendationEngine._from_stock(db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff, global_impacts=global_impacts)
                 if item and (best is None or item["score"] > best["score"]): best = item
             if best: recommendations.append(best)
         return RecommendationEngine._rank(recommendations)[:limit]
 
     @staticmethod
-    def _from_stock(db, symbol: str, alert=None, recent_sectors=None, cutoff=None):
+    def _global_sector_impacts(db, cutoff) -> dict:
+        """Scan recently ingested news for global macro signals and return sector -> impact."""
+        try:
+            articles = db.scalars(
+                select(NewsArticle).where(NewsArticle.created_at >= cutoff).order_by(NewsArticle.created_at.desc()).limit(300)
+            ).all()
+            signals = detect_global_signals(articles)
+            aggregate = aggregate_global_impact(signals)
+            return {item["sector"]: item for item in aggregate.get("sector_impacts", [])}
+        except Exception:
+            # Global intelligence is an enrichment layer; a failure here must never
+            # break recommendation generation.
+            return {}
+
+    @staticmethod
+    def _from_stock(db, symbol: str, alert=None, recent_sectors=None, cutoff=None, global_impacts=None):
         cutoff = cutoff or (datetime.utcnow() - timedelta(days=14))
         stock = db.scalar(select(Stock).where(Stock.symbol == symbol))
         if not stock: return None
@@ -77,7 +97,9 @@ class RecommendationEngine:
         model_score = RecommendationEngine._model_score(prediction)
         market_score = RecommendationEngine._market_score(market)
         evidence_score = RecommendationEngine._evidence_score(db, event, news, stock.sector, cutoff)
-        composite = round(min(100, 0.40 * intelligence_score + 0.20 * fundamental_score + 0.18 * model_score + 0.12 * market_score + 0.10 * evidence_score), 1)
+        global_assessment = RecommendationEngine._global_assessment(global_impacts, stock.sector)
+        global_score = global_assessment["score"]
+        composite = round(min(100, 0.36 * intelligence_score + 0.19 * fundamental_score + 0.17 * model_score + 0.11 * market_score + 0.09 * evidence_score + 0.08 * global_score), 1)
         priority = RecommendationEngine._priority(composite, intelligence_score, fundamental_score, model_score, evidence_score)
         risk = (alert.risk if alert else RecommendationEngine._risk(market, fundamentals)) or "MEDIUM"
         entry_low, entry_high = RecommendationEngine._entry_zone(current_price, market, risk)
@@ -95,9 +117,10 @@ class RecommendationEngine:
             "predicted_5d": expected_5d, "predicted_20d": expected_20d, "model_signal": prediction.signal if prediction else None,
             "reason": alert.reason if alert else RecommendationEngine._fallback_reason(event, fundamentals, prediction, market),
             "thesis": alert.title if alert else (event.title if event else f"{stock.company_name or stock.symbol}: multi-factor setup"),
-            "why_now": RecommendationEngine._why_now(alert, prediction, market, event), "invalidation": RecommendationEngine._invalidation(alert, prediction, market),
+            "why_now": RecommendationEngine._why_now(alert, prediction, market, event, global_assessment), "invalidation": RecommendationEngine._invalidation(alert, prediction, market),
             "fundamentals": fundamental_payload, "market": market,
             "fundamental_score": round(fundamental_score, 1), "model_score": round(model_score, 1), "market_score": round(market_score, 1), "evidence_score": round(evidence_score, 1),
+            "global_score": round(global_score, 1), "global_intelligence": global_assessment,
             "fundamental_quality_score": round(fundamental_assessment.quality_score, 1), "fundamental_growth_score": round(fundamental_assessment.growth_score, 1),
             "fundamental_profitability_score": round(fundamental_assessment.profitability_score, 1), "fundamental_balance_sheet_score": round(fundamental_assessment.balance_sheet_score, 1),
             "fundamental_valuation_score": round(fundamental_assessment.valuation_score, 1), "fundamental_cash_flow_score": round(fundamental_assessment.cash_flow_score, 1),
@@ -121,6 +144,39 @@ class RecommendationEngine:
         if composite >= 80 and intelligence >= 70 and fundamentals >= 60 and model >= 55 and evidence >= 55: return "HIGH"
         if composite >= 60 and intelligence >= 50 and (fundamentals >= 45 or model >= 50): return "MEDIUM"
         return "LOW"
+
+    @staticmethod
+    def _global_assessment(global_impacts, sector) -> dict:
+        """Translate detected global macro signals into a 0-100 score for this stock's sector.
+
+        global_impacts maps a signal-sector tag (e.g. "BANKING", "OIL & GAS") to an
+        aggregate impact record from GlobalIntelligence. A stock's yfinance sector is
+        expanded to the tags it plausibly belongs to via sector_tags_for, and the
+        strongest matching signal decides the score. No matching signal is neutral
+        (50), not a penalty — absence of global news is not evidence of anything.
+        """
+        if not global_impacts or not sector:
+            return {"score": 50.0, "matched": False, "sectors_considered": []}
+        tags = sector_tags_for(sector)
+        matches = [global_impacts[tag] for tag in tags if tag in global_impacts]
+        if not matches:
+            return {"score": 50.0, "matched": False, "sectors_considered": list(tags)}
+        strongest = max(matches, key=lambda m: abs(m["score"]))
+        # aggregate_global_impact's "score" is a running SUM across every matching
+        # article, not a per-signal strength -- a sector mentioned in 50 articles
+        # would otherwise swamp the scale. Normalize by signal count first so the
+        # result reflects average conviction, not article volume.
+        signal_count = max(1, strongest["signals"])
+        avg_impact = strongest["score"] / signal_count
+        score = max(0.0, min(100.0, 50.0 + avg_impact * 40))
+        return {
+            "score": round(score, 1),
+            "matched": True,
+            "sectors_considered": list(tags),
+            "matched_sector_tag": strongest["sector"],
+            "signal_count": strongest["signals"],
+            "raw_impact": round(avg_impact, 3),
+        }
 
     @staticmethod
     def _sector_intelligence_score(event, news, recent_sectors, stock):
@@ -212,12 +268,14 @@ class RecommendationEngine:
         return "Market setup is being monitored"
 
     @staticmethod
-    def _why_now(alert, prediction, market, event):
+    def _why_now(alert, prediction, market, event, global_assessment=None):
         if alert and alert.reason: return alert.reason
         parts=[]
         if event and event.title: parts.append(event.title)
         if prediction and prediction.predicted_return_5d is not None: parts.append(f"ML 5D estimate {float(prediction.predicted_return_5d):+.2f}%")
         if market.get("return_5d_pct") is not None: parts.append(f"5D price move {float(market['return_5d_pct']):+.2f}%")
+        if global_assessment and global_assessment.get("matched") and abs(global_assessment.get("raw_impact", 0)) >= 0.3:
+            parts.append(f"Global {global_assessment['matched_sector_tag'].title()} signal ({global_assessment['signal_count']} article(s))")
         return " · ".join(parts) if parts else "Fresh evidence is being evaluated"
 
     @staticmethod

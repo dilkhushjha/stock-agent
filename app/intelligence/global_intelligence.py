@@ -26,6 +26,29 @@ SIGNALS = (
 
 NEGATION = ("no ", "not ", "without ", "unlikely ")
 
+# The signals above tag sectors using market-desk shorthand (BANKING, IT, OIL & GAS).
+# Stocks in this app are classified with yfinance's GICS-style sector field
+# (e.g. "Financial Services", "Technology", "Energy"). Without this alias map,
+# a stock's sector would never match a signal's sector tag and every global
+# score would silently fall back to neutral.
+SECTOR_ALIASES: dict[str, tuple[str, ...]] = {
+    "FINANCIAL SERVICES": ("BANKING", "FINANCIAL SERVICES"),
+    "TECHNOLOGY": ("IT", "SOFTWARE", "TECHNOLOGY"),
+    "HEALTHCARE": ("PHARMA",),
+    "BASIC MATERIALS": ("METALS", "MINING", "CHEMICALS"),
+    "CONSUMER CYCLICAL": ("AUTO",),
+    "ENERGY": ("OIL & GAS",),
+    "INDUSTRIALS": ("AVIATION", "LOGISTICS"),
+}
+
+
+def sector_tags_for(yahoo_sector: str | None) -> tuple[str, ...]:
+    """Map a stock's yfinance sector to the signal-sector tags it should match."""
+    if not yahoo_sector:
+        return ()
+    key = yahoo_sector.strip().upper()
+    return SECTOR_ALIASES.get(key, (key,))
+
 def _text(article) -> str:
     return " ".join(str(getattr(article, field, "") or "") for field in ("title", "summary", "content", "source")).lower()
 
