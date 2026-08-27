@@ -5,18 +5,11 @@ from app.intelligence.fundamental_intelligence import FundamentalIntelligence
 
 def make(**overrides):
     values = dict(
-        revenue=1000,
-        net_income=150,
-        eps=10,
-        pe_ratio=18,
-        pb_ratio=2.2,
-        roe=0.18,
-        roa=0.08,
-        profit_margin=0.15,
-        operating_margin=0.20,
-        revenue_growth=0.12,
-        earnings_growth=0.18,
-        debt_to_equity=0.45,
+        revenue=1000, net_income=150, eps=10, pe_ratio=18, pb_ratio=2.2,
+        roe=0.18, roa=0.08, profit_margin=0.15, operating_margin=0.20,
+        revenue_growth=0.12, earnings_growth=0.18, debt_to_equity=0.45,
+        operating_cash_flow=180, capital_expenditure=-60, free_cash_flow=120,
+        total_debt=250, cash_and_equivalents=100, interest_expense=20,
     )
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -27,28 +20,37 @@ def test_strong_company_scores_well():
     assert assessment.score >= 70
     assert assessment.classification in {"STRONG", "EXCELLENT"}
     assert assessment.completeness == 1.0
+    assert assessment.cash_flow_score > 60
+    assert assessment.earnings_quality_score > 60
 
 
 def test_high_leverage_and_contraction_are_penalized():
-    assessment = FundamentalIntelligence.assess(
-        make(debt_to_equity=3.5, revenue_growth=-0.15, earnings_growth=-0.25, pe_ratio=80)
-    )
+    assessment = FundamentalIntelligence.assess(make(debt_to_equity=3.5, revenue_growth=-0.15, earnings_growth=-0.25, pe_ratio=80))
     assert assessment.score < 50
     assert "High leverage" in assessment.flags
     assert "Extreme P/E" in assessment.flags
 
 
 def test_missing_data_reduces_confidence_in_score():
-    assessment = FundamentalIntelligence.assess(
-        make(roe=None, roa=None, pb_ratio=None, debt_to_equity=None, operating_margin=None)
-    )
+    assessment = FundamentalIntelligence.assess(make(roe=None, roa=None, pb_ratio=None, debt_to_equity=None, operating_margin=None, operating_cash_flow=None, free_cash_flow=None))
     assert assessment.completeness < 0.75
     assert "Fundamental coverage is partial" in assessment.flags
 
 
 def test_expensive_stock_with_fast_growth_is_not_automatically_rejected():
-    assessment = FundamentalIntelligence.assess(
-        make(pe_ratio=48, earnings_growth=0.40, revenue_growth=0.30, roe=0.25)
-    )
+    assessment = FundamentalIntelligence.assess(make(pe_ratio=48, earnings_growth=0.40, revenue_growth=0.30, roe=0.25))
     assert assessment.valuation_score > 40
     assert assessment.growth_score >= 75
+
+
+def test_weak_cash_conversion_is_flagged():
+    assessment = FundamentalIntelligence.assess(make(operating_cash_flow=35, free_cash_flow=20))
+    assert assessment.cash_flow_score < 60
+    assert any("conversion" in flag.lower() or "cash flow" in flag.lower() for flag in assessment.flags)
+
+
+def test_negative_free_cash_flow_is_penalized():
+    assessment = FundamentalIntelligence.assess(make(operating_cash_flow=-50, free_cash_flow=-80))
+    assert assessment.cash_flow_score < 50
+    assert "Operating cash flow is negative" in assessment.flags
+    assert "Free cash flow is negative" in assessment.flags
