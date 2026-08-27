@@ -67,6 +67,9 @@ class NewsCollector:
                             "content": summary,
                             "source": source["name"],
                             "category": source["category"],
+                            "is_international": bool(
+                                source.get("is_international", False)
+                            ),
                             "published_at": (
                                 self._parse_date(entry)
                             ),

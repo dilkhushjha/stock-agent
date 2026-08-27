@@ -42,6 +42,12 @@ class NewsArticle(Base):
         nullable=False,
     )
 
+    # Which NEWS_SOURCES category/scope this came from. Previously collected by
+    # NewsCollector but never persisted, so once an article was stored there was
+    # no way to tell domestic from international coverage.
+    category = Column(String(50), nullable=True)
+    is_international = Column(Boolean, default=False, nullable=False)
+
     created_at = Column(
         DateTime,
         default=datetime.utcnow,

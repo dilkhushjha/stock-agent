@@ -54,6 +54,8 @@ class NewsIngestionService:
                 url=url,
                 content=article.get("content"),
                 source=article.get("source"),
+                category=article.get("category"),
+                is_international=bool(article.get("is_international", False)),
                 published_at=article.get("published_at"),
                 fingerprint=fingerprint,
                 is_processed=False,

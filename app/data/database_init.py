@@ -19,6 +19,11 @@ def initialize_database():
 
     _add_missing_column("market_events", "event_date", "DATETIME")
     _add_missing_column("news_articles", "fingerprint", "VARCHAR(64)")
+    _add_missing_column("news_articles", "category", "VARCHAR(50)")
+    _add_missing_column("news_articles", "is_international", "BOOLEAN")
+
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE news_articles SET is_international=0 WHERE is_international IS NULL"))
 
     stock_columns = {
         "exchange": "VARCHAR(10)", "isin": "VARCHAR(20)", "series": "VARCHAR(10)",

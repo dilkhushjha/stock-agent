@@ -47,9 +47,11 @@ def global_intelligence(limit: int = Query(100, ge=1, le=500), db: Session = Dep
         .limit(limit)
     ).all()
     signals = detect_global_signals(articles)
+    international_count = sum(1 for a in articles if getattr(a, "is_international", False))
     return {
         "generated_at": datetime.utcnow().isoformat(),
         "articles_scanned": len(articles),
+        "international_articles_scanned": international_count,
         "signals_detected": len(signals),
         "signals": signals,
         **aggregate_global_impact(signals),

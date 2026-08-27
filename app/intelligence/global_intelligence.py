@@ -66,12 +66,17 @@ def detect_global_signals(articles: Iterable) -> list[dict]:
     found = []
     for article in articles:
         text = _text(article)
+        is_international = bool(getattr(article, "is_international", False))
         for signal in SIGNALS:
             hits = [k for k in signal.keywords if k in text]
             if not hits: continue
             direction, confidence, positive, negative = _direction(signal, text)
             if any(f"{neg}{trigger}" in text for neg in NEGATION for trigger in hits): confidence = max(.45, confidence - .08)
-            found.append({"news_id": getattr(article, "id", None), "title": getattr(article, "title", ""), "source": getattr(article, "source", None), "source_url": getattr(article, "url", None), "published_at": getattr(article, "published_at", None), "topic": signal.topic, "direction": direction, "impact": signal.impact, "confidence": round(confidence, 3), "horizon": signal.horizon, "transmission": signal.transmission, "sectors": list(signal.sectors), "keyword_hits": hits, "directional_positive_hits": positive, "directional_negative_hits": negative})
+            # Primary international coverage (a global-locale feed reporting on the
+            # theme directly) is weighted slightly higher than a domestic outlet's
+            # secondhand mention of the same theme.
+            if is_international: confidence = min(.97, confidence + .05)
+            found.append({"news_id": getattr(article, "id", None), "title": getattr(article, "title", ""), "source": getattr(article, "source", None), "source_url": getattr(article, "url", None), "published_at": getattr(article, "published_at", None), "is_international": is_international, "topic": signal.topic, "direction": direction, "impact": signal.impact, "confidence": round(confidence, 3), "horizon": signal.horizon, "transmission": signal.transmission, "sectors": list(signal.sectors), "keyword_hits": hits, "directional_positive_hits": positive, "directional_negative_hits": negative})
             break
     return found
 
