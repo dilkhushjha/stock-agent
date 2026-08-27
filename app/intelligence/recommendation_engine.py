@@ -24,96 +24,51 @@ class RecommendationEngine:
         seen = set()
         now = datetime.utcnow()
         cutoff = now - timedelta(days=14)
-
-        alerts = db.scalars(
-            select(OpportunityAlert)
-            .where(OpportunityAlert.action.in_(["BUY", "WATCH"]))
-            .order_by(OpportunityAlert.opportunity_score.desc(), OpportunityAlert.created_at.desc())
-            .limit(100)
-        ).all()
+        alerts = db.scalars(select(OpportunityAlert).where(OpportunityAlert.action.in_(["BUY", "WATCH"])).order_by(OpportunityAlert.opportunity_score.desc(), OpportunityAlert.created_at.desc()).limit(100)).all()
         for alert in alerts:
-            if alert.symbol in seen:
-                continue
+            if alert.symbol in seen: continue
             item = RecommendationEngine._from_stock(db, alert.symbol, alert=alert, cutoff=cutoff)
             if item:
-                recommendations.append(item)
-                seen.add(alert.symbol)
-            if len(recommendations) >= limit:
-                return RecommendationEngine._rank(recommendations)[:limit]
-
-        recent_events = db.scalars(
-            select(MarketEvent)
-            .where(MarketEvent.event_date >= cutoff)
-            .order_by(MarketEvent.event_date.desc())
-            .limit(300)
-        ).all()
+                recommendations.append(item); seen.add(alert.symbol)
+            if len(recommendations) >= limit: return RecommendationEngine._rank(recommendations)[:limit]
+        recent_events = db.scalars(select(MarketEvent).where(MarketEvent.event_date >= cutoff).order_by(MarketEvent.event_date.desc()).limit(300)).all()
         recent_sectors = {str(e.sector).strip().upper() for e in recent_events if e.sector}
-
-        stocks = db.scalars(
-            select(Stock).where(Stock.is_active.is_(True)).order_by(Stock.symbol).limit(300)
-        ).all()
+        stocks = db.scalars(select(Stock).where(Stock.is_active.is_(True)).order_by(Stock.symbol).limit(300)).all()
         fallback = []
         for stock in stocks:
-            if stock.symbol in seen:
-                continue
-            item = RecommendationEngine._from_stock(
-                db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff
-            )
-            if item and item["score"] >= 30:
-                fallback.append(item)
-
+            if stock.symbol in seen: continue
+            item = RecommendationEngine._from_stock(db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff)
+            if item and item["score"] >= 30: fallback.append(item)
         fallback.sort(key=lambda x: (-x["score"], x["symbol"]))
         recommendations.extend(fallback[: max(0, limit - len(recommendations))])
-
         if not recommendations and stocks:
             best = None
             for stock in stocks:
-                item = RecommendationEngine._from_stock(
-                    db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff
-                )
-                if item and (best is None or item["score"] > best["score"]):
-                    best = item
-            if best:
-                recommendations.append(best)
-
+                item = RecommendationEngine._from_stock(db, stock.symbol, recent_sectors=recent_sectors, cutoff=cutoff)
+                if item and (best is None or item["score"] > best["score"]): best = item
+            if best: recommendations.append(best)
         return RecommendationEngine._rank(recommendations)[:limit]
 
     @staticmethod
     def _from_stock(db, symbol: str, alert=None, recent_sectors=None, cutoff=None):
         cutoff = cutoff or (datetime.utcnow() - timedelta(days=14))
         stock = db.scalar(select(Stock).where(Stock.symbol == symbol))
-        if not stock:
-            return None
-
-        event = None
-        news = None
+        if not stock: return None
+        event = None; news = None
         if alert:
             event = db.scalar(select(MarketEvent).where(MarketEvent.id == alert.event_id))
-            if event and event.news_id:
-                news = db.scalar(select(NewsArticle).where(NewsArticle.id == event.news_id))
-
+            if event and event.news_id: news = db.scalar(select(NewsArticle).where(NewsArticle.id == event.news_id))
         if not event:
             sector = (stock.sector or "").strip().upper()
-            events = db.scalars(
-                select(MarketEvent)
-                .where(MarketEvent.event_date >= cutoff, MarketEvent.sector.is_not(None))
-                .order_by(MarketEvent.event_date.desc())
-                .limit(300)
-            ).all()
+            events = db.scalars(select(MarketEvent).where(MarketEvent.event_date >= cutoff, MarketEvent.sector.is_not(None)).order_by(MarketEvent.event_date.desc()).limit(300)).all()
             event = next((e for e in events if str(e.sector).strip().upper() == sector), None)
-            if event and event.news_id:
-                news = db.scalar(select(NewsArticle).where(NewsArticle.id == event.news_id))
+            if event and event.news_id: news = db.scalar(select(NewsArticle).where(NewsArticle.id == event.news_id))
 
         fundamentals = db.scalar(select(CompanyFundamentals).where(CompanyFundamentals.stock_id == stock.id))
-        prediction = db.scalar(
-            select(MLPrediction).where(MLPrediction.stock_id == stock.id)
-            .order_by(MLPrediction.prediction_time.desc())
-        )
+        prediction = db.scalar(select(MLPrediction).where(MLPrediction.stock_id == stock.id).order_by(MLPrediction.prediction_time.desc()))
         market = RecommendationEngine._market_stats(db, stock.id)
         current_price = market.get("current_price") or (prediction.price_at_prediction if prediction else None)
-        if current_price is None:
-            return None
-
+        if current_price is None: return None
         expected_5d = prediction.predicted_return_5d if prediction else None
         expected_20d = prediction.predicted_return_20d if prediction else None
         fundamental_assessment = FundamentalIntelligence.assess(fundamentals)
@@ -127,10 +82,8 @@ class RecommendationEngine:
         risk = (alert.risk if alert else RecommendationEngine._risk(market, fundamentals)) or "MEDIUM"
         entry_low, entry_high = RecommendationEngine._entry_zone(current_price, market, risk)
         action = "BUY" if alert and alert.action == "BUY" and composite >= 65 else "WATCH"
-
         fundamental_payload = RecommendationEngine._fundamentals(fundamentals)
         fundamental_payload["intelligence"] = fundamental_assessment.as_dict()
-
         return {
             "rank": 0, "symbol": stock.symbol, "company": stock.company_name or stock.symbol,
             "sector": stock.sector or (fundamentals.sector if fundamentals else None) or (event.sector if event else None),
@@ -142,30 +95,17 @@ class RecommendationEngine:
             "predicted_5d": expected_5d, "predicted_20d": expected_20d, "model_signal": prediction.signal if prediction else None,
             "reason": alert.reason if alert else RecommendationEngine._fallback_reason(event, fundamentals, prediction, market),
             "thesis": alert.title if alert else (event.title if event else f"{stock.company_name or stock.symbol}: multi-factor setup"),
-            "why_now": RecommendationEngine._why_now(alert, prediction, market, event),
-            "invalidation": RecommendationEngine._invalidation(alert, prediction, market),
+            "why_now": RecommendationEngine._why_now(alert, prediction, market, event), "invalidation": RecommendationEngine._invalidation(alert, prediction, market),
             "fundamentals": fundamental_payload, "market": market,
-            "fundamental_score": round(fundamental_score, 1), "model_score": round(model_score, 1),
-            "market_score": round(market_score, 1), "evidence_score": round(evidence_score, 1),
-            "fundamental_quality_score": round(fundamental_assessment.quality_score, 1),
-            "fundamental_growth_score": round(fundamental_assessment.growth_score, 1),
-            "fundamental_profitability_score": round(fundamental_assessment.profitability_score, 1),
-            "fundamental_balance_sheet_score": round(fundamental_assessment.balance_sheet_score, 1),
-            "fundamental_valuation_score": round(fundamental_assessment.valuation_score, 1),
-            "fundamental_data_completeness": round(fundamental_assessment.completeness, 2),
-            "fundamental_classification": fundamental_assessment.classification,
-            "fundamental_flags": fundamental_assessment.flags,
-            "evidence": {"source": (alert.source_name if alert else None) or (news.source if news else None),
-                         "source_url": (alert.source_url if alert else None) or (news.url if news else None),
-                         "event_id": event.id if event else (alert.event_id if alert else None),
-                         "opportunity_score": alert.opportunity_score if alert else None,
-                         "evidence_count": RecommendationEngine._evidence_count(db, event, news, stock.sector, cutoff)},
-            "news": {"title": news.title if news else None, "source": news.source if news else None,
-                     "source_url": news.url if news else None, "published_at": news.published_at.isoformat() if news and news.published_at else None,
-                     "summary": news.summary if news else None},
-            "event": {"title": event.title if event else None, "description": event.description if event else None,
-                      "sector": event.sector if event else None, "direction": event.direction if event else None,
-                      "impact": event.impact if event else None, "horizon": event.time_horizon if event else None},
+            "fundamental_score": round(fundamental_score, 1), "model_score": round(model_score, 1), "market_score": round(market_score, 1), "evidence_score": round(evidence_score, 1),
+            "fundamental_quality_score": round(fundamental_assessment.quality_score, 1), "fundamental_growth_score": round(fundamental_assessment.growth_score, 1),
+            "fundamental_profitability_score": round(fundamental_assessment.profitability_score, 1), "fundamental_balance_sheet_score": round(fundamental_assessment.balance_sheet_score, 1),
+            "fundamental_valuation_score": round(fundamental_assessment.valuation_score, 1), "fundamental_cash_flow_score": round(fundamental_assessment.cash_flow_score, 1),
+            "fundamental_earnings_quality_score": round(fundamental_assessment.earnings_quality_score, 1), "fundamental_data_completeness": round(fundamental_assessment.completeness, 2),
+            "fundamental_classification": fundamental_assessment.classification, "fundamental_flags": fundamental_assessment.flags,
+            "evidence": {"source": (alert.source_name if alert else None) or (news.source if news else None), "source_url": (alert.source_url if alert else None) or (news.url if news else None), "event_id": event.id if event else (alert.event_id if alert else None), "opportunity_score": alert.opportunity_score if alert else None, "evidence_count": RecommendationEngine._evidence_count(db, event, news, stock.sector, cutoff)},
+            "news": {"title": news.title if news else None, "source": news.source if news else None, "source_url": news.url if news else None, "published_at": news.published_at.isoformat() if news and news.published_at else None, "summary": news.summary if news else None},
+            "event": {"title": event.title if event else None, "description": event.description if event else None, "sector": event.sector if event else None, "direction": event.direction if event else None, "impact": event.impact if event else None, "horizon": event.time_horizon if event else None},
             "created_at": (alert.created_at if alert else datetime.utcnow()).isoformat(),
         }
 
@@ -206,22 +146,15 @@ class RecommendationEngine:
     def _market_stats(db, stock_id: int) -> dict:
         rows = list(reversed(db.scalars(select(MarketData).where(MarketData.stock_id == stock_id).order_by(MarketData.timestamp.desc()).limit(260)).all()))
         if not rows: return {}
-        closes = [float(r.close) for r in rows if r.close is not None]
-        volumes = [float(r.volume) for r in rows if r.volume is not None and r.volume > 0]
+        closes = [float(r.close) for r in rows if r.close is not None]; volumes = [float(r.volume) for r in rows if r.volume is not None and r.volume > 0]
         if not closes: return {}
         current = closes[-1]
         def ret(days): return (current / closes[-days - 1] - 1) * 100 if len(closes) > days and closes[-days - 1] else None
         daily = [(closes[i] / closes[i-1] - 1) for i in range(1, len(closes)) if closes[i-1]]
         recent = daily[-20:]; mean = sum(recent) / len(recent) if recent else 0
         vol20 = (sum((x-mean)**2 for x in recent)/len(recent))**0.5 * sqrt(252) * 100 if recent else None
-        high52, low52 = max(closes[-252:]), min(closes[-252:])
-        avg20 = sum(volumes[-20:])/min(20, len(volumes)) if volumes else None; latest = volumes[-1] if volumes else None
-        return {"current_price": round(current,2), "return_1d_pct": round(ret(1),2) if ret(1) is not None else None,
-                "return_5d_pct": round(ret(5),2) if ret(5) is not None else None, "return_20d_pct": round(ret(20),2) if ret(20) is not None else None,
-                "return_60d_pct": round(ret(60),2) if ret(60) is not None else None, "volatility_20d_annualized_pct": round(vol20,2) if vol20 is not None else None,
-                "high_52w": round(high52,2), "low_52w": round(low52,2), "distance_from_52w_high_pct": round((current/high52-1)*100,2) if high52 else None,
-                "distance_from_52w_low_pct": round((current/low52-1)*100,2) if low52 else None, "volume_vs_20d_avg": round(latest/avg20,2) if latest and avg20 else None,
-                "data_points": len(rows), "data_as_of": rows[-1].timestamp.isoformat() if rows[-1].timestamp else None}
+        high52, low52 = max(closes[-252:]), min(closes[-252:]); avg20 = sum(volumes[-20:])/min(20, len(volumes)) if volumes else None; latest = volumes[-1] if volumes else None
+        return {"current_price": round(current,2), "return_1d_pct": round(ret(1),2) if ret(1) is not None else None, "return_5d_pct": round(ret(5),2) if ret(5) is not None else None, "return_20d_pct": round(ret(20),2) if ret(20) is not None else None, "return_60d_pct": round(ret(60),2) if ret(60) is not None else None, "volatility_20d_annualized_pct": round(vol20,2) if vol20 is not None else None, "high_52w": round(high52,2), "low_52w": round(low52,2), "distance_from_52w_high_pct": round((current/high52-1)*100,2) if high52 else None, "distance_from_52w_low_pct": round((current/low52-1)*100,2) if low52 else None, "volume_vs_20d_avg": round(latest/avg20,2) if latest and avg20 else None, "data_points": len(rows), "data_as_of": rows[-1].timestamp.isoformat() if rows[-1].timestamp else None}
 
     @staticmethod
     def _market_score(m):
@@ -236,14 +169,12 @@ class RecommendationEngine:
 
     @staticmethod
     def _evidence_count(db,event,news,sector=None,cutoff=None):
-        cutoff = cutoff or (datetime.utcnow()-timedelta(days=14))
-        count=1 if news else 0
+        cutoff = cutoff or (datetime.utcnow()-timedelta(days=14)); count=1 if news else 0
         if event:
             related=db.scalars(select(MarketEvent).where(MarketEvent.id!=event.id,MarketEvent.event_date>=cutoff)).all()
             if sector: related=[e for e in related if e.sector and str(e.sector).strip().upper()==str(sector).strip().upper()]
             count += len(related)
-        if sector:
-            count += db.scalar(select(func.count(NewsArticle.id)).where(NewsArticle.created_at>=cutoff)) or 0
+        if sector: count += db.scalar(select(func.count(NewsArticle.id)).where(NewsArticle.created_at>=cutoff)) or 0
         return min(50,count)
 
     @staticmethod
@@ -252,36 +183,26 @@ class RecommendationEngine:
     @staticmethod
     def _entry_zone(current,market,risk):
         if not current: return None,None
-        vol=market.get("volatility_20d_annualized_pct") or 25
-        discount=min(0.08,max(0.02,vol/1000)) + (0.02 if str(risk).upper()=="HIGH" else 0)
+        vol=market.get("volatility_20d_annualized_pct") or 25; discount=min(0.08,max(0.02,vol/1000)) + (0.02 if str(risk).upper()=="HIGH" else 0)
         return round(current*(1-discount),2),round(current*(1+min(0.01,discount/4)),2)
 
     @staticmethod
-    def _fundamental_score(f):
-        return FundamentalIntelligence.assess(f).score
+    def _fundamental_score(f): return FundamentalIntelligence.assess(f).score
 
     @staticmethod
     def _model_score(p):
-        if not p:
-            return 45.0
-        score = 50.0
-        if p.predicted_return_5d is not None:
-            score += max(-20, min(20, float(p.predicted_return_5d) * 3))
-        if p.predicted_return_20d is not None:
-            score += max(-15, min(15, float(p.predicted_return_20d) * 2))
-        if str(p.signal or "").upper() in {"BUY", "BULLISH", "LONG"}:
-            score += 8
-        elif str(p.signal or "").upper() in {"SELL", "BEARISH", "SHORT"}:
-            score -= 8
-        return max(0, min(100, score))
+        if not p: return 45.0
+        score=50.0
+        if p.predicted_return_5d is not None: score += max(-20,min(20,float(p.predicted_return_5d)*3))
+        if p.predicted_return_20d is not None: score += max(-15,min(15,float(p.predicted_return_20d)*2))
+        if str(p.signal or "").upper() in {"BUY","BULLISH","LONG"}: score+=8
+        elif str(p.signal or "").upper() in {"SELL","BEARISH","SHORT"}: score-=8
+        return max(0,min(100,score))
 
     @staticmethod
     def _fundamentals(f):
         if not f: return {}
-        return {"pe":f.pe_ratio,"pb":f.pb_ratio,"roe":f.roe,"debt_to_equity":f.debt_to_equity,"profit_margin":f.profit_margin,
-                "revenue_growth":f.revenue_growth,"earnings_growth":f.earnings_growth,"market_cap":f.market_cap,
-                "revenue":f.revenue,"net_income":f.net_income,"eps":f.eps,"roa":f.roa,"operating_margin":f.operating_margin,
-                "sector":f.sector,"industry":f.industry}
+        return {"pe":f.pe_ratio,"pb":f.pb_ratio,"roe":f.roe,"debt_to_equity":f.debt_to_equity,"profit_margin":f.profit_margin,"revenue_growth":f.revenue_growth,"earnings_growth":f.earnings_growth,"market_cap":f.market_cap,"revenue":f.revenue,"net_income":f.net_income,"eps":f.eps,"roa":f.roa,"operating_margin":f.operating_margin,"sector":f.sector,"industry":f.industry,"operating_cash_flow":f.operating_cash_flow,"capital_expenditure":f.capital_expenditure,"free_cash_flow":f.free_cash_flow,"total_debt":f.total_debt,"cash_and_equivalents":f.cash_and_equivalents,"interest_expense":f.interest_expense}
 
     @staticmethod
     def _fallback_reason(event, fundamentals, prediction, market):
